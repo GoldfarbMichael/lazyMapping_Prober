@@ -1,0 +1,24 @@
+# Executables
+lazyMapping_Prober
+*.o
+
+# Log files
+*.jsonl
+*.log
+
+# Build artifacts
+*.a
+*.so
+
+# IDE files
+.vscode/
+*.swp
+*.swo
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*~
+*.tmp
