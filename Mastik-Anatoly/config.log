@@ -33,7 +33,7 @@ PATH: /home/ubu/.vscode-server/cli/servers/Stable-94e8ae2b28cb5cc932b86e1070569c
 PATH: /home/ubu/.local/share/umake/bin
 PATH: /home/ubu/.local/bin
 PATH: /home/ubu/bin
-PATH: /home/ubu/anaconda3/bin
+PATH: /home/ubu/anaconda3/envs/PC37/bin
 PATH: /home/ubu/anaconda3/condabin
 PATH: /usr/local/sbin
 PATH: /usr/local/bin
@@ -47,7 +47,6 @@ PATH: /snap/bin
 PATH: /opt/intel/sgxsdk/bin
 PATH: /opt/intel/sgxsdk/bin/x64
 PATH: /home/ubu/.local/share/JetBrains/Toolbox/scripts
-PATH: /home/ubu/.vscode-server/extensions/ms-python.debugpy-2025.18.0-linux-x64/bundled/scripts/noConfigScripts
 PATH: /opt/intel/sgxsdk/bin
 PATH: /opt/intel/sgxsdk/bin/x64
 
@@ -933,6 +932,7 @@ config.status:834: creating Makefile
 config.status:834: creating src/Makefile
 config.status:834: creating demo/Makefile
 config.status:834: creating src/config.h
+config.status:1004: src/config.h is unchanged
 
 ## ---------------- ##
 ## Cache variables. ##

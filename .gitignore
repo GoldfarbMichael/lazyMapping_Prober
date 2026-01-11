@@ -5,6 +5,8 @@ lazyMapping_Prober
 # Log files
 *.jsonl
 *.log
+*.txt
+*.patch
 
 # Build artifacts
 *.a

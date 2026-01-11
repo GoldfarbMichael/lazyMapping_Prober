@@ -26,6 +26,8 @@
 #include <unistd.h>
 #include <strings.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+
 #ifdef __APPLE__
 #include <mach/vm_statistics.h>
 #endif
@@ -515,29 +517,81 @@ l3pp_t l3_prepare(l3info_t l3info) {
     l3pp_t l3 = (l3pp_t)malloc(sizeof(struct l3pp));
     bzero(l3, sizeof(struct l3pp));
     if (l3info != NULL)
-    bcopy(l3info, &l3->l3info, sizeof(struct l3info));
+        bcopy(l3info, &l3->l3info, sizeof(struct l3info));
     fillL3Info(l3);
     
-    // Allocate cache  buffer
-    int bufsize;
+// --- ALLOCATION START ---
+    int bufsize = l3->l3info.bufsize;
     char *buffer = MAP_FAILED;
+
+    // OPTION 1: Deterministic File-Backed Hugepage
+    // This allows you to "reopen" the same physical memory in different runs/processes.
+    if (l3->l3info.backing_file != NULL) {
+        printf("Mastik: using deterministic backing file: %s\n", l3->l3info.backing_file);
+
+        // 1. Open or Create the file
+        // Note: Needs <fcntl.h>
+        int fd = open(l3->l3info.backing_file, O_RDWR | O_CREAT, 0666);
+        if (fd < 0) {
+            perror("Mastik Error: Failed to open backing file");
+            free(l3);
+            return NULL;
+        }
+
+        // 2. Align buffer size to hugepage boundaries
+        // We act as if HUGEPAGES are enabled because the file is in /dev/hugepages
 #ifdef HUGEPAGES
-    if ((l3->l3info.flags & L3FLAG_NOHUGEPAGES) == 0) {
+        if ((l3->l3info.flags & L3FLAG_NOHUGEPAGES) == 0) {
+            bufsize = (bufsize + HUGEPAGESIZE - 1) & ~HUGEPAGEMASK;
+            l3->groupsize = L3_GROUPSIZE_FOR_HUGEPAGES;
+        }
+#endif
+
+        // 3. Resize the file (Reserve the physical memory)
+        // Note: Needs <unistd.h>
+        if (ftruncate(fd, bufsize) != 0) {
+            perror("Mastik Error: Failed to resize backing file");
+            close(fd);
+            free(l3);
+            return NULL;
+        }
+
+        // 4. Map Shared
+        // MAP_SHARED is crucial here. It ensures changes persist to the file (RAM),
+        // allowing other processes to see the same physical memory.
+        buffer = mmap(NULL, bufsize, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+        
+        // Close fd (mapping remains valid)
+        close(fd);
+    }
+
+    // OPTION 2: Anonymous Hugepages (Legacy/Default)
+    // Only runs if no file was provided or file mapping failed (though we returned on fail above)
+#ifdef HUGEPAGES
+    if (buffer == MAP_FAILED && (l3->l3info.flags & L3FLAG_NOHUGEPAGES) == 0) {
         bufsize = (l3->l3info.bufsize + HUGEPAGESIZE - 1) & ~HUGEPAGEMASK;
         l3->groupsize = L3_GROUPSIZE_FOR_HUGEPAGES;
         buffer = mmap(NULL, bufsize, PROT_READ|PROT_WRITE, MAP_ANON|MAP_PRIVATE|HUGEPAGES, -1, 0);
     }
 #endif
     
+    // OPTION 3: Standard 4KB Pages (Fallback)
     if (buffer == MAP_FAILED) {
+        if (l3->l3info.backing_file != NULL) {
+             fprintf(stderr, "Mastik Warning: File mapping failed. Falling back to standard pages.\n");
+        }
         bufsize = l3->l3info.bufsize;
         l3->groupsize = L3_SETS_PER_PAGE;
         buffer = mmap(NULL, bufsize, PROT_READ|PROT_WRITE, MAP_ANON|MAP_PRIVATE, -1, 0);
     }
+
+    // Check for total failure
     if (buffer == MAP_FAILED) {
+        perror("Mastik Fatal: mmap failed");
         free(l3);
         return NULL;
     }
+    // --- ALLOCATION END ---
     l3->buffer = buffer;
     l3->l3info.bufsize = bufsize;
     
@@ -971,4 +1025,47 @@ void l3_compress_monitored_sets(l3pp_t l3) {
     new_b_head = NULL;
     old_b_tail = NULL;
   }
+}
+
+// ---- My additions here ----
+
+void **l3_get_eviction_sets(l3pp_t l3) {
+    if (!l3) return NULL;
+
+    // 1. Calculate Total Sets (Internal access)
+    int total_sets = l3_getSets(l3);
+
+    // 2. Monitor ALL sets to populate internal structures
+    // (This fills l3->monitoredhead and l3->monitoredset)
+    for (int i = 0; i < total_sets; i++) {
+        l3_monitor(l3, i);
+    }
+
+    // 3. Allocate the Dense Array
+    // We use calloc to ensure unmapped sets are NULL
+    void **dense_array = (void **)calloc(total_sets, sizeof(void *));
+    if (!dense_array) return NULL;
+
+    // 4. Map Internal Sparse Arrays to Dense Array
+    // We access the struct members DIRECTLY now.
+    // l3->nmonitored:   Count of active sets
+    // l3->monitoredset: Array of Set IDs [idx0, idx1, ...]
+    // l3->monitoredhead: Array of Pointers [ptr0, ptr1, ...]
+    
+    for (int i = 0; i < l3->nmonitored; i++) {
+        int set_id = l3->monitoredset[i];
+        void *head = l3->monitoredhead[i];
+        // if(i % 256 == 0) {
+        //     printf("i IS: %d set_idx IS: %d\n", i, set_id);
+        // }
+        if (set_id >= 0 && set_id < total_sets) {
+            dense_array[set_id] = head;
+        }
+    }
+
+    // 5. Cleanup
+    // Clear Mastik's internal monitoring list so the user starts fresh
+    l3_unmonitorall(l3);
+
+    return dense_array;
 }

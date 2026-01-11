@@ -27,6 +27,10 @@ struct l3info {
   int setsperslice;
   int bufsize;
   int flags;
+
+  // Optional backing file for hugepages (MY EDIT)
+  char *backing_file;
+
   l3progressNotification_t progressNotification;
   void *progressNotificationData;
 };
@@ -80,6 +84,9 @@ int l3_repeatedprobets_compressed(l3pp_t l3, int nrecords, uint64_t *results, in
 void l3_compress_monitored_sets(l3pp_t l3);
 extern int perf_llc_reads_fd;
 
+
+// ------ My edits end here ------
+void **l3_get_eviction_sets(l3pp_t l3);
 
 #endif // __L3_H__
 
