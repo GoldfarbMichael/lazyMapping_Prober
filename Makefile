@@ -12,7 +12,7 @@ CFLAGS = -g -O3 -Wall -Wextra -I./Mastik-Anatoly/src
 LDFLAGS = -L./Mastik-Anatoly/src -lmastik
 
 # Project Files
-SRCS = src/main.c src/utils.c
+SRCS = src/main.c src/utils.c src/tests.c
 OBJS = $(SRCS:.c=.o)
 
 # Executable Name
