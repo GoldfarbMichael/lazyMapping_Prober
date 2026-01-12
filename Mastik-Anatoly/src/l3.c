@@ -597,6 +597,7 @@ l3pp_t l3_prepare(l3info_t l3info) {
     
     // Create the cache map
     if (!ptemap(l3)) {
+        printf("Mastik: using probed L3 mapping\n");
         if (!probemap(l3)) {
             free(l3->buffer);
             free(l3);
@@ -1068,4 +1069,16 @@ void **l3_get_eviction_sets(l3pp_t l3) {
     l3_unmonitorall(l3);
 
     return dense_array;
+}
+
+
+
+void *l3_get_buffer(l3pp_t l3) {
+    if (!l3) return NULL;
+    return l3->buffer;
+}
+
+size_t l3_get_buffer_size(l3pp_t l3) {
+    if (!l3) return 0;
+    return l3->l3info.bufsize;
 }

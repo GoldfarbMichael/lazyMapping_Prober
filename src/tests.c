@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <sys/mman.h>
 
 #include "tests.h"
 #include "utils.h"
@@ -31,7 +32,7 @@ void dump_eSets_to_txt(void **e_sets, int numOfSets, const char *filename){
         // We assume pointer chasing: the content of 'curr' is the address of 'next'
         do {
             uintptr_t pa = virt_to_phys(curr);
-            fprintf(fp, "address %d: PA=0x%lx\n", i, pa);
+            fprintf(fp, "address %d: PA=0x%lx; VA=0x%lx\n", i, pa, (uintptr_t)curr);
             
             // Move to next: dereference the pointer to get the next address
             curr = *(void **)curr;
@@ -90,4 +91,38 @@ int test_save_and_load_physical_mapping(l3pp_t *l3, void **e_sets,const char *fi
 
     free(loaded_pa);
     return 0;
+}
+
+
+int test_mapping_BIN_reconstruction_to_eSets(const char *mapping_file, const char *hugePage_file,const char *dump_file){
+
+
+
+    // 1. Map the file directly (No L3 struct yet!)
+    size_t buf_size = 24 * 1024 * 1024; // e.g. 24MB, needs to match what was saved this is what mastik allocates --> we allocated it to hugepages
+    void *buffer = map_hugepage_file(hugePage_file, buf_size);
+    
+    if (buffer == MAP_FAILED) return 1;
+
+    // 2. Load PAs
+    int count;
+    uint64_t *phys_map = load_physical_mapping(mapping_file, &count);
+
+
+    for (int i = 0; i < 12; i++) {
+            printf("  Way %d: 0x%lx\n", i, phys_map[i]);
+    }
+    // 3. Reconstruct sets INTO that buffer
+    // You can hardcode 16384/12 or save it in the bin file header
+    int sets = 16384; 
+    int ways = 12;
+    void **e_sets = fill_eviction_sets(buffer, buf_size, phys_map, sets, ways);
+    if (e_sets == NULL) {
+        fprintf(stderr, "ERROR: Failed to retrieve eviction sets.\n");
+        return 1;
+    }
+
+    dump_eSets_to_txt(e_sets, sets, dump_file);
+    return 0;
+
 }

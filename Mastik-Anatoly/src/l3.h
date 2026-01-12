@@ -87,6 +87,9 @@ extern int perf_llc_reads_fd;
 
 // ------ My edits end here ------
 void **l3_get_eviction_sets(l3pp_t l3);
+// Expose internal buffer for reconstruction tools
+void *l3_get_buffer(l3pp_t l3);
+size_t l3_get_buffer_size(l3pp_t l3);
 
 #endif // __L3_H__
 

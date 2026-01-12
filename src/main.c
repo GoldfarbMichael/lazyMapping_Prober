@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <l3.h>
 #include <util.h>
+#include <sys/mman.h>
 
 
 #include "utils.h"
@@ -62,7 +63,7 @@ int main(int argc, char **argv) {
     }
 
     printf("Successfully retrieved eviction sets array. Dumping to file...\n");
-    dump_eSets_to_txt(e_sets, sets, "dump2.txt");
+    dump_eSets_to_txt(e_sets, sets, "dump.txt");
 
 
     // --- STEP 1 TEST: Save and Load Physical Mapping ---
@@ -70,9 +71,11 @@ int main(int argc, char **argv) {
     if (test_save_and_load_physical_mapping(&l3, e_sets, MAPPING_FILE_A) != 0) {
         fprintf(stderr, "Test failed.\n");
     }
-    else {
-        free(e_sets);
-        return 0;
+
+
+
+    if (test_mapping_BIN_reconstruction_to_eSets(MAPPING_FILE_A, HUGEPAGE_PATH_A, "dump_reconstructed.txt") != 0) {
+        fprintf(stderr, "Reconstruction Test failed.\n");
     }
 
     free(e_sets);
