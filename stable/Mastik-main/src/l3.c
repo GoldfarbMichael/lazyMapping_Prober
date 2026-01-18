@@ -286,3 +286,8 @@ void l3_repeatedpabort(l3pp_t l3, int sample, int16_t *results, uint32_t time_li
     results[cont] = l3_pabort(l3, time_limit);
   } while(cont++ < sample);
 }
+
+void l3_testHeaders(int dummy){
+    printf("L3 and related headers are working correctly. HERE IS MY DUMMY %d\n", dummy);
+
+}

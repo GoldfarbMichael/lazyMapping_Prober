@@ -231,6 +231,7 @@ int main(int argc, char **argv) {
 
     // free(e_sets);
     // l3_release(l3);
+    l3_testHeaders(45);
 
     l3pp_t l3=NULL;
     prepareL3(&l3);

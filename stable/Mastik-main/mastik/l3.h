@@ -90,5 +90,7 @@ void l3_repeatedpabort(l3pp_t l3, int sample, int16_t *results, uint32_t time_li
 int loadL3cpuidInfo(l3info_t l3info);
 void fillL3Info(l3info_t l3info);
 
+void l3_testHeaders(int dummy);
+
 #endif // __L3_H__
 

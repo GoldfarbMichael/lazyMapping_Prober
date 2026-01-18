@@ -7,7 +7,7 @@ MASTIK_DIR = ./Mastik-main
 
 # CFLAGS:
 # -I$(MASTIK_DIR)/src : Adds your local Mastik src folder to the include path.
-CFLAGS = -g -O3 -Wall -Wextra -I$(MASTIK_DIR)/src 
+CFLAGS = -g -O3 -Wall -Wextra -I$(MASTIK_DIR)/src -I$(MASTIK_DIR)
 
 # LDFLAGS:
 # -L$(MASTIK_DIR)/src : Tells the linker to look in your local folder for libmastik.a
