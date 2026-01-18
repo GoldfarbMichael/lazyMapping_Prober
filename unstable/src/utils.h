@@ -7,6 +7,7 @@
 
 void prepareL3(l3pp_t *l3, l3info_t info);
 
+l3pp_t prepareDeterministicL3(const char *mapping_file, char *hugePage_file, int num_sets, int ways);
 
 uintptr_t virt_to_phys(void *vaddr);
 

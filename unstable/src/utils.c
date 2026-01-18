@@ -38,6 +38,45 @@ void prepareL3(l3pp_t *l3, l3info_t info){
     }
 }
 
+
+l3pp_t prepareDeterministicL3(const char *mapping_file, char *hugePage_file, int num_sets, int ways){
+
+    // 1. Map the file directly (No L3 struct yet!)
+    size_t buf_size = 24 * 1024 * 1024; // e.g. 24MB, needs to match what was saved this is what mastik allocates --> we allocated it to hugepages
+    void *buffer = map_hugepage_file(hugePage_file, buf_size);
+    
+    if (buffer == MAP_FAILED) return NULL;
+
+    // 2. Load PAs
+    int count;
+    uint64_t *phys_map = load_physical_mapping(mapping_file, &count);
+
+
+    for (int i = 0; i < ways; i++) {
+            printf("  Way %d: 0x%lx\n", i, phys_map[i]);
+    }
+    // 3. Reconstruct sets INTO that buffer
+    void **e_sets = fill_eviction_sets(buffer, buf_size, phys_map, num_sets, ways);
+    if (e_sets == NULL) {
+        fprintf(stderr, "ERROR: Failed to retrieve eviction sets.\n");
+        return NULL;
+    }
+
+
+    struct l3info info;
+    memset(&info, 0, sizeof(info));
+    info.backing_file = hugePage_file;
+    l3pp_t l3 = l3_prepare_deterministic(&info, buffer, e_sets, num_sets);
+
+    if (!l3) return NULL;
+    printf("L3 Prepared Deterministically.\n");
+    free(e_sets);
+    return l3;  
+}
+
+
+
+
 // Helper to get Physical Address from Virtual Address
 uintptr_t virt_to_phys(void *vaddr) {
     int fd = open("/proc/self/pagemap", O_RDONLY);
@@ -67,7 +106,6 @@ uintptr_t virt_to_phys(void *vaddr) {
     // Add the offset-within-the-page back (the last 12 bits)
     return (phys_pfn * 4096) + ((uintptr_t)vaddr % 4096);
 }
-
 
 // --- Step 1: Save Physical Addresses ---
 int save_physical_mapping(l3pp_t l3, void **eviction_sets, const char *filename) {
@@ -164,9 +202,6 @@ uint64_t* load_physical_mapping(const char *filename, int *out_num_entries) {
     fclose(fp);
     return data;
 }
-
-
-
 
 // --- Map Hugepage File Directly ---
 void *map_hugepage_file(const char *path, size_t size) {

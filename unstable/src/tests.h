@@ -10,4 +10,5 @@ int test_save_and_load_physical_mapping(l3pp_t *l3, void **e_sets, const char *f
 
 int test_mapping_BIN_reconstruction_to_eSets(const char *mapping_file, const char *hugePage_file,const char *dump_file);
 
+int test_mapping_l3_prepare_deterministic(const char *mapping_file, char *hugePage_file,const char *dump_file);
 #endif

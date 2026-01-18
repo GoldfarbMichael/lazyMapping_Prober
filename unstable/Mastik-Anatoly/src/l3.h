@@ -90,6 +90,7 @@ void **l3_get_eviction_sets(l3pp_t l3);
 // Expose internal buffer for reconstruction tools
 void *l3_get_buffer(l3pp_t l3);
 size_t l3_get_buffer_size(l3pp_t l3);
-
+void investigate_l3pp_t(l3pp_t l3, char* filename);
+l3pp_t l3_prepare_deterministic(l3info_t l3info, void *buffer, void **eSets, int nsets);
 #endif // __L3_H__
 

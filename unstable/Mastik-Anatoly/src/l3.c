@@ -1082,3 +1082,200 @@ size_t l3_get_buffer_size(l3pp_t l3) {
     if (!l3) return 0;
     return l3->l3info.bufsize;
 }
+
+
+// Helper to get Physical Address from Virtual Address
+uintptr_t virt_to_physM(void *vaddr) {
+    int fd = open("/proc/self/pagemap", O_RDONLY);
+    if (fd < 0) return 0;
+    // Calculate which "page number" the virtual address belongs to
+    //    (Divide by 4096 because standard pages are 4KB)
+    uintptr_t virt_pfn = (uintptr_t)vaddr / 4096;
+
+    // Calculate where in the 'pagemap' file this information is stored
+    //    (Multiply by 8 because each entry is 8 bytes long
+    off_t offset = virt_pfn * sizeof(uint64_t);
+    uint64_t page;
+    
+    // Read the 64-bit entry from the kernel
+    if (pread(fd, &page, sizeof(uint64_t), offset) != sizeof(uint64_t)) {
+        close(fd);
+        return 0;
+    }
+    close(fd);
+
+    // Check if present
+    if ((page & (1ULL << 63)) == 0) return 0;
+
+    // PFN is bits 0-54
+    uintptr_t phys_pfn = page & 0x7FFFFFFFFFFFFFULL;
+
+    // Add the offset-within-the-page back (the last 12 bits)
+    return (phys_pfn * 4096) + ((uintptr_t)vaddr % 4096);
+}
+
+void investigate_l3pp_t(l3pp_t l3, char* filename) {
+    if (!l3) return;
+
+    FILE *f = fopen(filename, "w");
+    if (!f) {
+        perror("Failed to open investigation file");
+        return;
+    }
+    
+    fprintf(f, "=== L3 Struct Investigation ===\n");
+    fprintf(f, "ngroups = %d\n", l3->ngroups);
+    fprintf(f, "groupsize = %d\n", l3->groupsize);
+    
+    // Check if the Master List (groups) is allocated
+    if (l3->groups == NULL) {
+        fprintf(f, "CRITICAL: l3->groups is NULL! (Mastik is using mm->l3groups or uninitialized?)\n");
+    } else {
+        fprintf(f, "l3->groups is allocated at %p. Dumping content:\n", (void*)l3->groups);
+        
+        for (int i = 0; i < l3->ngroups; i++) {
+            fprintf(f, "Group %d\n", i);
+            
+            vlist_t group = l3->groups[i];
+            if (group == NULL) {
+                fprintf(f, "  [NULL Group Vlist]\n");
+                continue;
+            }
+            
+            int len = vl_len(group);
+            fprintf(f, "  Size: %d lines\n", len);
+            
+            for (int j = 0; j < len; j++) {
+                void *addr = vl_get(group, j);
+                // Print Virtual Address. 
+                // (Optional: You could call virt_to_phys here if you include utils.h, but let's keep it simple)
+                fprintf(f, "  addr%d: PA:0x %lx; VA: %p\n", j, virt_to_physM(addr), addr);
+            }
+        }
+    }
+    
+    fclose(f);
+    printf("Investigation complete. Check 'investigation.txt'.\n");
+}
+
+
+
+// Helper to manually install sets into Mastik's stride-based structure
+void l3_set_manual_eviction_sets(l3pp_t l3, void **sets, int total_sets) {
+    if (!l3 || !sets) return;
+
+    // 1. Infer Groupsize (Standard Hugepage Geometry)
+    if (l3->groupsize == 0) l3->groupsize = 1024; 
+    
+    int ngroups = total_sets / l3->groupsize;
+    
+    // Safety check for alignment
+    if (total_sets % l3->groupsize != 0) {
+        fprintf(stderr, "Mastik Warning: Total sets %d is not a multiple of groupsize %d. Geometry might be wrong.\n", total_sets, l3->groupsize);
+    }
+
+    // 2. Clean up old groups
+    if (l3->groups) {
+        for (int i = 0; i < l3->ngroups; i++) {
+            if (l3->groups[i]) vl_free(l3->groups[i]);
+        }
+        free(l3->groups);
+    }
+
+    // 3. Allocate new groups array (The 16 Base Groups)
+    l3->ngroups = ngroups;
+    l3->groups = (vlist_t *)calloc(ngroups, sizeof(vlist_t));
+    if (!l3->groups) {
+        perror("Mastik: Failed to allocate groups");
+        exit(1);
+    }
+    
+    printf("Mastik: Compressing %d sets into %d Base Groups (Stride: %d)...\n", total_sets, ngroups, l3->groupsize);
+
+    // 4. Populate the Base Groups (Set 0, Set 1024, ...)
+    for (int g = 0; g < ngroups; g++) {
+        int base_set_idx = g * l3->groupsize;
+        void *head = sets[base_set_idx]; 
+
+        if (head == NULL) {
+            l3->groups[g] = vl_new();
+            continue;
+        }
+
+        vlist_t list = vl_new();
+        void *curr = head;
+        int count = 0;
+        
+        // Traverse the cycle to collect the physical line addresses
+        // This reconstructs the "Raw Material" for Set 0 of this group.
+        do {
+            vl_push(list, curr);
+            curr = *(void **)curr; 
+            count++;
+            if (count > l3->l3info.associativity + 5) break; 
+        } while (curr != head);
+
+        l3->groups[g] = list;
+    }
+    
+    // Free existing monitoring arrays (allocated by l3_prepare)
+    if (l3->monitoredset) free(l3->monitoredset);
+    if (l3->monitoredhead) free(l3->monitoredhead);
+    if (l3->monitoredbitmap) free(l3->monitoredbitmap);
+
+    // Allocate monitored set info
+    l3->monitoredbitmap = (uint32_t *)calloc(l3->ngroups*l3->groupsize/32, sizeof(uint32_t));
+    l3->monitoredset = (int *)malloc(l3->ngroups * l3->groupsize * sizeof(int));
+    l3->monitoredhead = (void **)malloc(l3->ngroups * l3->groupsize * sizeof(void *));
+
+    // Yossi: 32 data structures, one for each pagesum
+    l3->monitoredhead_compressed = (void **)malloc(L3_SETS_PER_PAGE / STEP * sizeof(void *));
+
+    l3->nmonitored = 0;
+
+    printf("Mastik: Manual Install Complete. Groups: %d, Monitored: %d\n", l3->ngroups, l3->nmonitored);
+}
+
+/**
+ * Deterministic L3 Constructor
+ * * @param l3info  Configuration info (will be copied)
+ * @param buffer  The specific buffer you mapped in main()
+ * @param eSets   The eviction sets you constructed in main() (relative to buffer)
+ * @param nsets   Number of sets
+ */
+l3pp_t l3_prepare_deterministic(l3info_t l3info, void *buffer, void **eSets, int nsets) {
+    // 1. Safety Checks
+    if (!eSets || !buffer) {
+        fprintf(stderr, "Mastik Error: buffer and eSets are required.\n");
+        return NULL;
+    }
+
+    printf("Mastik: Preparing Deterministic L3 (nsets=%d)...\n", nsets);
+
+    // 2. Allocate Struct
+    l3pp_t l3 = (l3pp_t)malloc(sizeof(struct l3pp));
+    if (!l3) return NULL;
+    bzero(l3, sizeof(struct l3pp));
+
+    // 3. Setup Info
+    if (l3info != NULL)
+        bcopy(l3info, &l3->l3info, sizeof(struct l3info));
+    fillL3Info(l3); 
+
+    // 4. Assign the Buffer (CRITICAL)
+    // We do NOT map a new buffer. We adopt the one you passed.
+    // This ensures l3->buffer matches the VAs inside eSets.
+    l3->buffer = buffer;
+    
+
+    // 5. Install the Sets
+    // This populates l3->groups and l3->monitored* using your eSets
+    l3_set_manual_eviction_sets(l3, eSets, nsets);
+
+    // 6. Compatibility Allocations (Yossi's code)
+#if defined(L3_SETS_PER_PAGE) && defined(STEP)
+    l3->monitoredhead_compressed = (void **)malloc(L3_SETS_PER_PAGE / STEP * sizeof(void *));
+#endif
+
+    return l3;
+}
