@@ -287,7 +287,54 @@ void l3_repeatedpabort(l3pp_t l3, int sample, int16_t *results, uint32_t time_li
   } while(cont++ < sample);
 }
 
+
+// ============================================ My additions here ============================================
+
 void l3_testHeaders(int dummy){
     printf("L3 and related headers are working correctly. HERE IS MY DUMMY %d\n", dummy);
 
 }
+
+
+void **l3_get_eviction_sets(l3pp_t l3) {
+    if (!l3) return NULL;
+
+    // 1. Calculate Total Sets (Internal access)
+    int total_sets = l3_getSets(l3);
+
+    // 2. Monitor ALL sets to populate internal structures
+    // (This fills l3->monitoredhead and l3->monitoredset)
+    for (int i = 0; i < total_sets; i++) {
+        l3_monitor(l3, i);
+    }
+
+    // 3. Allocate the Dense Array
+    // We use calloc to ensure unmapped sets are NULL
+    void **dense_array = (void **)calloc(total_sets, sizeof(void *));
+    if (!dense_array) return NULL;
+
+    // 4. Map Internal Sparse Arrays to Dense Array
+    // We access the struct members DIRECTLY now.
+    // l3->nmonitored:   Count of active sets
+    // l3->monitoredset: Array of Set IDs [idx0, idx1, ...]
+    // l3->monitoredhead: Array of Pointers [ptr0, ptr1, ...]
+    
+    for (int i = 0; i < l3->nmonitored; i++) {
+        int set_id = l3->monitoredset[i];
+        void *head = l3->monitoredhead[i];
+        // if(i % 256 == 0) {
+        //     printf("i IS: %d set_idx IS: %d\n", i, set_id);
+        // }
+        if (set_id >= 0 && set_id < total_sets) {
+            dense_array[set_id] = head;
+        }
+    }
+
+    // 5. Cleanup
+    // Clear Mastik's internal monitoring list so the user starts fresh
+    l3_unmonitorall(l3);
+
+    return dense_array;
+}
+
+

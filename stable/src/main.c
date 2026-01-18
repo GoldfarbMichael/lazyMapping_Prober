@@ -231,59 +231,87 @@ int main(int argc, char **argv) {
 
     // free(e_sets);
     // l3_release(l3);
-    l3_testHeaders(45);
 
+
+
+// ============================================ START: Regular 2 Mastik Prepares and 1 slice Probe tests ============================================
+
+    //  printf("=== Testing simple prepareL3 call ===\n");
+    // l3pp_t l3=NULL;
+    // prepareL3(&l3);
+
+
+    // sleep(3);
+
+    // l3pp_t l3B = NULL;
+    // prepareL3(&l3B);
+
+    // int setsPerSlice = l3_getSets(l3) / l3_getSlices(l3);
+    // monitorSlice(l3, 0); // Attacker monitors slice 0
+    // uint16_t *resAttacker = (uint16_t*) calloc(setsPerSlice, sizeof(uint16_t));
+    // // GET_PLACE macro can return indices 0-31, so we need at least 32 elements
+    // uint16_t *resVictim = (uint16_t*) calloc(1, sizeof(uint16_t));
+    // uint16_t *finalResVictim = (uint16_t*) calloc(l3_getSets(l3B), sizeof(uint16_t));
+    // // zero out finalResVictim
+    // memset(finalResVictim, 0, l3_getSets(l3B) * sizeof(uint16_t));
+    
+    // for (int i = 0; i < l3_getSets(l3B); i++) {
+    //     // Victim accesses its monitored set
+    //     //zero out resVictim
+    //     memset(resVictim, 0, sizeof(uint16_t));
+    //     l3_unmonitorall(l3B);
+    //     l3_monitor(l3B, i); 
+    //     l3_bprobecount(l3B, resVictim);
+
+    //     l3_probecount(l3, resAttacker);
+
+    //     l3_probecount(l3B,resVictim);
+    //     finalResVictim[i] = resVictim[0];
+
+    // }
+
+    // sleep(3);
+    // printf("Victim Probecount Results:\n");
+    // // log final results into a file
+    // FILE *fp = fopen("victim_probecount_results.txt", "w");
+    // if (!fp) {
+    //     perror("Failed to open output file");
+    //     return 1;
+    // }
+    // for (int i = 0; i < l3_getSets(l3B); i++) {
+    //     // printf("Set %d: %d\n", i, finalResVictim[i]);
+    //     fprintf(fp, "Set %d: %u\n", i, finalResVictim[i]);
+    // }
+    // fclose(fp);
+    // l3_release(l3);
+
+
+// ============================================ END: Regular 2 Mastik Prepares and 1 slice Probe tests ============================================
+
+
+// ============================================ START: 1 Mastik Prepare and **Get Eviction Sets** test (by dumping to txt) ============================================
+
+
+    printf("=== Testing simple prepareL3 call ===\n");
     l3pp_t l3=NULL;
     prepareL3(&l3);
+    int numOfsets = l3_getSets(l3);
 
-
-    sleep(3);
-
-    l3pp_t l3B = NULL;
-    prepareL3(&l3B);
-
-    int setsPerSlice = l3_getSets(l3) / l3_getSlices(l3);
-    monitorSlice(l3, 0); // Attacker monitors slice 0
-    uint16_t *resAttacker = (uint16_t*) calloc(setsPerSlice, sizeof(uint16_t));
-    // GET_PLACE macro can return indices 0-31, so we need at least 32 elements
-    uint16_t *resVictim = (uint16_t*) calloc(32, sizeof(uint16_t));
-    uint16_t *finalResVictim = (uint16_t*) calloc(l3_getSets(l3B), sizeof(uint16_t));
-    // zero out finalResVictim
-    memset(finalResVictim, 0, l3_getSets(l3B) * sizeof(uint16_t));
-    
-    for (int i = 0; i < l3_getSets(l3B); i++) {
-        // Victim accesses its monitored set
-        //zero out resVictim
-        memset(resVictim, 0, 32 * sizeof(uint16_t));
-        l3_unmonitorall(l3B);
-        l3_monitor(l3B, i); 
-        l3_bprobecount(l3B, resVictim);
-
-        l3_probecount(l3, resAttacker);
-
-        l3_probecount(l3B,resVictim);
-        finalResVictim[i] = resVictim[0];
-
-    }
-
-    sleep(3);
-    printf("Victim Probecount Results:\n");
-    // log final results into a file
-    FILE *fp = fopen("victim_probecount_results.txt", "w");
-    if (!fp) {
-        perror("Failed to open output file");
+// --- Retrieve Eviction Sets ---
+    void **e_sets = l3_get_eviction_sets(l3);
+    if (e_sets == NULL) {
+        fprintf(stderr, "ERROR: Failed to retrieve eviction sets.\n");
+        free(l3);
         return 1;
     }
-    for (int i = 0; i < l3_getSets(l3B); i++) {
-        // printf("Set %d: %d\n", i, finalResVictim[i]);
-        fprintf(fp, "Set %d: %u\n", i, finalResVictim[i]);
-    }
-    fclose(fp);
 
-
-
-
-
+    printf("Successfully retrieved eviction sets array. Dumping to file...\n");
+    dump_eSets_to_txt(e_sets, numOfsets, "dump.txt");
+    free(e_sets);
     l3_release(l3);
+
+// ============================================ END: 1 Mastik Prepare and **Get Eviction Sets** test (by dumping to txt) ============================================
+
+
     return 0;
 }

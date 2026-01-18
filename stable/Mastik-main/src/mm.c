@@ -140,6 +140,7 @@ int mm_initialisel3(mm_t mm)
     // Create the cache map
     if (!ptemap(mm))
     {
+      printf("PTEmap failed! Falling back to probemap\n");
       if (!probemap(mm))
       {
         free(mm->l3buffer);
