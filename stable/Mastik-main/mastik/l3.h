@@ -101,5 +101,6 @@ void l3_print_l3buffer_pas(l3pp_t l3);
 void l3_dump_groups(l3pp_t l3, const char *filename);
 void l3_dump_l3memory_pas(l3pp_t l3);
 void enable_PTE_flag(mm_t mm);
+int l3_monitor_manual(l3pp_t l3, int setIndex, void *setHead);
 #endif // __L3_H__
 

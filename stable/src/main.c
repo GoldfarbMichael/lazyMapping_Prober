@@ -20,13 +20,33 @@
 #define MAPPING_FILE_B "mapping_B.bin"
 
 void monitorSlice(l3pp_t l3, int slice) {
-    int sets_per_slice = l3_getSets(l3) / l3_getSlices(l3);
+    // int sets_per_slice = l3_getSets(l3) / l3_getSlices(l3);
+    int sets_per_slice = 1024;
+
     int start_set = slice * sets_per_slice;
     int end_set = start_set + sets_per_slice;
 
     l3_unmonitorall(l3);
     for (int s = start_set; s < end_set; s++) {
         l3_monitor(l3, s);
+    }
+}
+
+
+void monitorSlice_manual(l3pp_t l3, int slice, void** e_sets) {
+    // int sets_per_slice = 1024;
+    // int start_set = (slice * sets_per_slice)+1024;
+
+    int sets_per_slice = l3_getSets(l3) / l3_getSlices(l3);
+    int start_set = slice * sets_per_slice;
+    
+
+    // int end_set = start_set + sets_per_slice;
+    int end_set = start_set + 1024;
+    
+    l3_unmonitorall(l3);
+    for (int s = start_set; s < end_set; s++) {
+        l3_monitor_manual(l3, s, e_sets[s]);
     }
 }
 
@@ -175,9 +195,45 @@ int main(int argc, char **argv) {
 
 // ******************************************** END: Backed 2 Mastik Prepares (l3, l3B) ********************************************
 
+  
+    int sets = 16384; 
+    int ways = 12;
+    size_t buf_size = 24 * 1024 * 1024; // e.g. 24MB, needs to match what was saved this is what mastik allocates --> we allocated it to hugepages
+
+    void *bufferA = map_hugepage_file(HUGEPAGE_PATH_A, buf_size);
+    if (bufferA == MAP_FAILED) return 1;
+
+    void *bufferB = map_hugepage_file(HUGEPAGE_PATH_B, buf_size);
+    if (bufferB == MAP_FAILED) return 1;
+
+
+    // 2. Load PAs
+    int count;
+    uint64_t *phys_mapA = load_physical_mapping(MAPPING_FILE_A, &count);
+    uint64_t *phys_mapB = load_physical_mapping(MAPPING_FILE_B, &count);
+
+
+    for (int i = 0; i < 12; i++) {
+            printf("  Way %d: 0x%lx\n", i, phys_mapA[i]);
+    }
+
+    for (int i = 0; i < 12; i++) {
+            printf("  Way %d: 0x%lx\n", i, phys_mapB[i]);
+    }
+
+    void **e_setsA = fill_eviction_sets(bufferA, buf_size, phys_mapA, sets, ways);
+    if (e_setsA == NULL) {
+        fprintf(stderr, "ERROR: Failed to retrieve eviction setsS.\n");
+        return 1;
+    }
 
 
 
+    void **e_setsB = fill_eviction_sets(bufferB, buf_size, phys_mapB, sets, ways);
+    if (e_setsB == NULL) {
+        fprintf(stderr, "ERROR: Failed to retrieve eviction setsB.\n");
+        return 1;
+    }
 
 
 
@@ -190,20 +246,24 @@ int main(int argc, char **argv) {
 
     for(int slice = 0; slice < l3_getSlices(l3); slice++){
         printf("Monitoring whole slice\n");
-        monitorSlice(l3, slice); // Attacker monitors slice 0
+        // monitorSlice(l3, slice); // Attacker monitors slice 0
+        monitorSlice_manual(l3, slice, e_setsA); // Victim monitors same slice
+
         uint16_t *resAttacker = (uint16_t*) calloc(setsPerSlice, sizeof(uint16_t));
         // GET_PLACE macro can return indices 0-31, so we need at least 32 elements
         uint16_t *resVictim = (uint16_t*) calloc(1, sizeof(uint16_t));
         uint16_t *finalResVictim = (uint16_t*) calloc(l3_getSets(l3B), sizeof(uint16_t));
         // zero out finalResVictim
         memset(finalResVictim, 0, l3_getSets(l3B) * sizeof(uint16_t));
-        printf("Starting 1-slice probe tests...\n");
+        printf("Starting %d-slice probe tests...\n", slice);
         for (int i = 0; i < l3_getSets(l3B); i++) {
             // Victim accesses its monitored set
             //zero out resVictim
             memset(resVictim, 0, sizeof(uint16_t));
             l3_unmonitorall(l3B);
-            l3_monitor(l3B, i); 
+            // l3_monitor(l3B, i); 
+            l3_monitor_manual(l3B, i, e_setsB[i]);
+            // l3_bprobecount(l3B, resVictim);
             l3_bprobecount(l3B, resVictim);
 
             l3_probecount(l3, resAttacker);
@@ -335,6 +395,19 @@ int main(int argc, char **argv) {
     // } else {
     //     printf("Error checking contiguity (need root?)\n");
     // }
+        
+    
+    // uint16_t *resT = (uint16_t*) calloc(1, sizeof(uint16_t));
+    // l3_unmonitorall(l3);
+    // l3_monitor_manual(l3, 0, e_setsA[0]);
+    // l3_probecount(l3, resT);
+    // printf("111Probing Set 0, Result: %u\n", resT[0]);
+    // l3_unmonitorall(l3);
+    // l3_monitor_manual(l3, 0, e_setsA[0]);
+    // l3_probecount(l3, resT);
+    // printf("222Probing Set 0, Result: %u\n", resT[0]);
+
+
 
 
     l3_release(l3);

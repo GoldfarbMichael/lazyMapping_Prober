@@ -410,7 +410,6 @@ l3pp_t l3_prepare_backed(const char *backing_file_path) {
     l3->internalmm = 1;
   }
   printf("Mastik: l3->mm->memory addresses before setting backing file: PA=0x%lx VA=%p\n", virt_to_physM(l3->mm->memory), l3->mm->memory);
-  // l3->mm->backing_file = strdup(backing_file_path); 
   // l3->mm->l3info.flags |= L3FLAG_USEPTE;  ** MAKE IT USE PTE FLAG **
   if (!mm_initialisel3(l3->mm)) 
     return NULL;
@@ -428,7 +427,6 @@ l3pp_t l3_prepare_backed(const char *backing_file_path) {
   l3->monitoredhead = (void **)malloc(l3->ngroups * l3->groupsize * sizeof(void *));
   l3->nmonitored = 0;
   l3->totalsets = l3->ngroups * l3->groupsize;
-  l3_print_l3buffer_pas(l3);
   free(l3info);
   return l3;
 }
@@ -540,4 +538,87 @@ void enable_PTE_flag(mm_t mm) {
         mm->l3info.flags |= L3FLAG_USEPTE;
         printf("Mastik: Enabled L3FLAG_USEPTE flag in mm structure.\n");
     }
+}
+
+
+/*
+ * Manually installs a pre-constructed eviction set into the l3 object.
+ * This bypasses the probing phase entirely.
+ *
+ * @param l3: The l3 object (initialized via l3_prepare_backed).
+ * @param setIndex: The target cache set index (0 to totalsets-1).
+ * CRITICAL: This index must match the physical slice/set mapping 
+ * you expect if you are relying on specific slice targeting.
+ * @param setHead: Pointer to the head of the cyclic linked list (Virtual Address).
+ * Must be a valid VA in the current process context.
+ * @return: 1 on success, 0 on failure.
+ */
+// int l3_monitor_manual(l3pp_t l3, int setIndex, void *setHead) {
+ 
+//     if (setIndex < 0 || setIndex >= l3->totalsets)
+//       return 0;
+//     if (IS_MONITORED(l3->monitoredbitmap, setIndex))
+//       return 0;
+    
+
+
+//     l3->monitoredset[l3->nmonitored] = setIndex;
+//     l3->monitoredhead[l3->nmonitored++] = setHead;
+//     SET_MONITORED(l3->monitoredbitmap, setIndex);
+
+//     return 1;
+// }
+
+
+int l3_monitor_manual(l3pp_t l3, int setIndex, void *setHead) {
+ 
+    if (setIndex < 0 || setIndex >= l3->totalsets)
+      return 0;
+    if (IS_MONITORED(l3->monitoredbitmap, setIndex))
+      return 0;
+    if (setHead == NULL)
+      return 0;
+
+    // Count the number of ways and collect all nodes
+    int len = 0;
+    void *current = setHead;
+    void **nodes = NULL;
+    
+    // First pass: count nodes
+    do {
+        len++;
+        current = LNEXT(current);
+    } while (current != setHead);
+    
+    // Allocate temporary array to hold all node pointers
+    nodes = (void **)malloc(len * sizeof(void *));
+    if (!nodes)
+        return 0;
+    
+    // Second pass: collect all nodes
+    current = setHead;
+    for (int i = 0; i < len; i++) {
+        nodes[i] = current;
+        current = LNEXT(current);
+    }
+    
+    // Build doubly-linked circular list (same as lx_monitor)
+    for (int way = 0; way < len; way++) {
+        void *mem = nodes[way];
+        void *nmem = nodes[(way + 1) % len];
+        void *pmem = nodes[(way - 1 + len) % len];
+        
+        // Forward pointer at offset 0
+        LNEXT(mem) = nmem;
+        // Backward pointer at offset 8 (points to previous node's NEXTPTR location)
+        LNEXT(mem + sizeof(void*)) = (pmem + sizeof(void *));
+    }
+    
+    free(nodes);
+
+    l3->monitoredset[l3->nmonitored] = setIndex;
+    l3->monitoredhead[l3->nmonitored++] = setHead;
+    SET_MONITORED(l3->monitoredbitmap, setIndex);
+
+    return 1;
 }
