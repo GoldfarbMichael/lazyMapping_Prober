@@ -67,5 +67,5 @@ void mm_release(mm_t mm);
 
 int mm_initialisel3(mm_t mm);
 
-
+mm_t mm_prepare_with_BackUpFile(lxinfo_t l1info, lxinfo_t l2info, lxinfo_t l3info, const char* backing_file);
 #endif // __MM_H__

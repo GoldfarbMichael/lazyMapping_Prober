@@ -33,6 +33,8 @@ struct mm {
   vlist_t *l3groups;
   void* l3buffer;
   
+  const char *backing_file;
+  
   pagetype_e pagetype;
 };
 

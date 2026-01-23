@@ -4,7 +4,7 @@
 #include <mastik/l3.h>
 
 
-void dump_eSets_to_txt(void **e_sets, int numOfSets, const char *filename);
+void dump_eSets_to_txt(void **e_sets, int numOfSets, const char *filename, int enableVA);
 
 int test_save_and_load_physical_mapping(l3pp_t *l3, void **e_sets, const char *filename);
 

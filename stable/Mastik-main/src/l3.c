@@ -16,7 +16,7 @@
  * You should have received a copy of the GNU General Public License
  * along with Mastik.  If not, see <http://www.gnu.org/licenses/>.
  */
-
+#define _GNU_SOURCE
 #include "config.h"
 #include <stdio.h>
 #include <assert.h>
@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <string.h>
 #include <strings.h>
 #include <sys/mman.h>
 #ifdef __APPLE__
@@ -145,7 +146,7 @@ void prime(void *pp, int reps) {
 #define str(x) #x
 #define xstr(x) str(x)
 
-l3pp_t l3_prepare(l3info_t l3info, mm_t mm) {
+l3pp_t l3_prepare(l3info_t l3info, mm_t mm, int enablePTE) {
   // Setup
   l3pp_t l3 = (l3pp_t)malloc(sizeof(struct l3pp));
   bzero(l3, sizeof(struct l3pp));
@@ -163,8 +164,12 @@ l3pp_t l3_prepare(l3info_t l3info, mm_t mm) {
   
   l3->mm = mm;
   if (l3->mm == NULL) {
+    printf("[DEBUG] Mastik: l3.c; l3_prepare; l3->mm = mm_prepare(NULL, NULL, (lxinfo_t)l3info); --> Creating internal mm for l3\n");
     l3->mm = mm_prepare(NULL, NULL, (lxinfo_t)l3info);
     l3->internalmm = 1;
+  }
+   if (enablePTE) {
+    enable_PTE_flag(l3->mm);
   }
   
   if (!mm_initialisel3(l3->mm)) 
@@ -187,6 +192,10 @@ void l3_release(l3pp_t l3) {
   lx_release((lxpp_t)l3);
 }
 
+
+/**
+ * @brief Target function for graphing.
+ */
 int l3_monitor(l3pp_t l3, int line) {
   return lx_monitor((lxpp_t) l3, line);
 }
@@ -301,13 +310,16 @@ void **l3_get_eviction_sets(l3pp_t l3) {
 
     // 1. Calculate Total Sets (Internal access)
     int total_sets = l3_getSets(l3);
-
     // 2. Monitor ALL sets to populate internal structures
     // (This fills l3->monitoredhead and l3->monitoredset)
     for (int i = 0; i < total_sets; i++) {
-        l3_monitor(l3, i);
-    }
 
+        uint64_t start_cycles = rdtscp64();
+        l3_monitor(l3, i);
+        uint64_t end_cycles = rdtscp64();
+        double time_cycles = (double)((end_cycles - start_cycles) / 3.1e9) * 1e3; // in ms
+        // printf("Monitoring set %d took: %.3f ms\n", i, time_cycles);
+    }
     // 3. Allocate the Dense Array
     // We use calloc to ensure unmapped sets are NULL
     void **dense_array = (void **)calloc(total_sets, sizeof(void *));
@@ -332,9 +344,200 @@ void **l3_get_eviction_sets(l3pp_t l3) {
 
     // 5. Cleanup
     // Clear Mastik's internal monitoring list so the user starts fresh
+    // l3_print_l3buffer_pas(l3);
+    l3_dump_groups(l3, "l3_groups_dump.txt");
+
     l3_unmonitorall(l3);
 
     return dense_array;
 }
 
 
+// Helper to get Physical Address from Virtual Address
+uintptr_t virt_to_physM(void *vaddr) {
+    int fd = open("/proc/self/pagemap", O_RDONLY);
+    if (fd < 0) return 0;
+    // Calculate which "page number" the virtual address belongs to
+    //    (Divide by 4096 because standard pages are 4KB)
+    uintptr_t virt_pfn = (uintptr_t)vaddr / 4096;
+
+    // Calculate where in the 'pagemap' file this information is stored
+    //    (Multiply by 8 because each entry is 8 bytes long
+    off_t offset = virt_pfn * sizeof(uint64_t);
+    uint64_t page;
+    
+    // Read the 64-bit entry from the kernel
+    if (pread(fd, &page, sizeof(uint64_t), offset) != sizeof(uint64_t)) {
+        close(fd);
+        return 0;
+    }
+    close(fd);
+
+    // Check if present
+    if ((page & (1ULL << 63)) == 0) return 0;
+
+    // PFN is bits 0-54
+    uintptr_t phys_pfn = page & 0x7FFFFFFFFFFFFFULL;
+
+    // Add the offset-within-the-page back (the last 12 bits)
+    return (phys_pfn * 4096) + ((uintptr_t)vaddr % 4096);
+}
+
+
+l3pp_t l3_prepare_backed(const char *backing_file_path) {
+  // Setup
+  l3info_t l3info = (l3info_t)malloc(sizeof(struct l3info));
+  l3pp_t l3 = (l3pp_t)malloc(sizeof(struct l3pp));
+  bzero(l3, sizeof(struct l3pp));
+  if (l3info != NULL)
+    bcopy(l3info, &l3->l3info, sizeof(struct l3info));
+  fillL3Info(&l3->l3info);
+  l3->level = L3;
+
+  // Check if linearmap and quadratic map are called together
+  if ((l3->l3info.flags & (L3FLAG_LINEARMAP | L3FLAG_QUADRATICMAP)) == (L3FLAG_LINEARMAP | L3FLAG_QUADRATICMAP)) {
+    free(l3);
+    fprintf(stderr, "Error: Cannot call linear and quadratic map together\n");
+    return NULL;
+  }
+  printf("\n");
+  mm_t mm = NULL;
+  l3->mm = mm;
+  
+  if (l3->mm == NULL) {
+    l3->mm = mm_prepare_with_BackUpFile(NULL, NULL, (lxinfo_t)l3info, backing_file_path);
+    // l3->mm = mm_prepare(NULL, NULL, (lxinfo_t)&l3->l3info);
+    l3->internalmm = 1;
+  }
+  printf("Mastik: l3->mm->memory addresses before setting backing file: PA=0x%lx VA=%p\n", virt_to_physM(l3->mm->memory), l3->mm->memory);
+  // l3->mm->backing_file = strdup(backing_file_path); 
+  // l3->mm->l3info.flags |= L3FLAG_USEPTE;  ** MAKE IT USE PTE FLAG **
+  if (!mm_initialisel3(l3->mm)) 
+    return NULL;
+  
+  printf("Mastik: l3->mm->l3buffer addresses before setting backing file: PA=0x%lx VA=%p\n", virt_to_physM(l3->mm->l3buffer), l3->mm->l3buffer);
+  
+  printf("\n");
+  
+  l3->ngroups = l3->mm->l3ngroups;
+  l3->groupsize = l3->mm->l3groupsize;
+  
+  // Allocate monitored set info
+  l3->monitoredbitmap = (uint32_t *)calloc((l3->ngroups*l3->groupsize/32) + 1, sizeof(uint32_t));
+  l3->monitoredset = (int *)malloc(l3->ngroups * l3->groupsize * sizeof(int));
+  l3->monitoredhead = (void **)malloc(l3->ngroups * l3->groupsize * sizeof(void *));
+  l3->nmonitored = 0;
+  l3->totalsets = l3->ngroups * l3->groupsize;
+  l3_print_l3buffer_pas(l3);
+  free(l3info);
+  return l3;
+}
+
+
+
+//dump into txt file inside physical address values l3->mm->l3buffer 
+void l3_print_l3buffer_pas(l3pp_t l3) {
+  //create txt file
+  FILE *file = fopen("l3buffer_physical_addresses.txt", "w");
+  if (file == NULL) {
+      perror("Error opening file");
+      return;
+  }
+  printf("Mastik: l3->mm->l3buffer physical address: PA=0x%lx\n", virt_to_physM(l3->mm->l3buffer));
+  for (size_t offset = 0; offset < l3->l3info.bufsize; offset += 64) {
+      void *current_address = (void *)((uintptr_t)l3->mm->l3buffer + offset);
+      //value at current address
+      uintptr_t value = *(uintptr_t *)current_address;
+      uintptr_t pa = virt_to_physM(current_address);
+      fprintf(file, "Offset: 0x%lx, VA: %p, PA: 0x%lx, Value: 0x%lx\n", offset, current_address, pa, value);
+  }
+  fclose(file);
+}
+
+
+
+//dump into txt file inside physical address values l3->mm->memory
+void l3_dump_l3memory_pas(l3pp_t l3) {
+  //create txt file
+  FILE *file = fopen("l3memory_physical_addresses.txt", "w");
+  if (file == NULL) {
+      perror("Error opening file");
+      return;
+  }
+  printf("Mastik: l3->mm->memory physical address: PA=0x%lx\n", virt_to_physM(l3->mm->memory));
+  void *buf = vl_get(l3->mm->memory, 0); // Get the first buffer from the memory list
+  for (size_t offset = 0; offset < l3->l3info.bufsize; offset += 64) {
+   
+    void *current_address = (void *)((uintptr_t)buf + offset);
+      //value at current address
+      uintptr_t value = *(uintptr_t *)current_address;
+      uintptr_t pa = virt_to_physM(current_address);
+      fprintf(file, "Offset: 0x%lx, VA: %p, PA: 0x%lx, Value: 0x%lx\n", offset, current_address, pa, value);
+  }
+  fclose(file);
+}
+
+
+
+// L3 Dump Function Uses l3->mm->l3groups 
+void l3_dump_groups(l3pp_t l3, const char *filename) {
+    if (!l3) {
+        fprintf(stderr, "Error: l3 is NULL\n");
+        return;
+    }
+    
+    if (!l3->mm->l3groups) {
+        fprintf(stderr, "Error: l3->groups is NULL. Probing or Loading hasn't happened.\n");
+        return;
+    }
+
+    FILE *fp = fopen(filename, "w");
+    if (!fp) {
+        perror("Error opening dump file");
+        return;
+    }
+
+    // 1. Header Information
+    // We try to resolve the PA of the groups array itself just for context
+    uintptr_t groups_pa = virt_to_physM(l3->mm->l3groups);
+    
+    fprintf(fp, "groups PA=%p, VA=%p\n", (void*)groups_pa, (void*)l3->mm->l3groups);
+    fprintf(fp, "ngroups=%d\n", l3->ngroups);
+    fprintf(fp, "groupsize=%d\n", l3->groupsize);
+    fprintf(fp, "totalsets=%zu\n", l3->totalsets);
+
+    // 2. Iterate over Groups
+    for (int i = 0; i < l3->ngroups; i++) {
+        fprintf(fp, "---Group%d---\n", i);
+        
+        vlist_t group = l3->mm->l3groups[i];
+        if (group == NULL) {
+            fprintf(fp, "  (Empty/NULL)\n");
+            continue;
+        }
+
+        // 3. Iterate over Lines/Sets inside the Group
+        int len = vl_len(group);
+        for (int j = 0; j < len; j++) {
+            void *va = vl_get(group, j);
+            uintptr_t pa = virt_to_physM(va);
+
+            // Read the value stored at this address (it's a pointer/VA)
+            uintptr_t value_va = *(uintptr_t *)va;
+            // Convert the stored VA to PA
+            uintptr_t value_pa = virt_to_physM((void *)value_va);
+            // Format: setX: PA={}; VA={}
+            fprintf(fp, "set%d: PA=0x%lx; VA=%p; valueInside=0x%lx\n", j, pa, va, value_pa);
+        }
+    }
+
+    fclose(fp);
+    printf("Dumped L3 groups to %s\n", filename);
+}
+
+void enable_PTE_flag(mm_t mm) {
+    if (mm) {
+        mm->l3info.flags |= L3FLAG_USEPTE;
+        printf("Mastik: Enabled L3FLAG_USEPTE flag in mm structure.\n");
+    }
+}

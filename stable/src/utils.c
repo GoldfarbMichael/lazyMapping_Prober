@@ -22,24 +22,7 @@ typedef struct {
 
 
 
-// void prepareL3(l3pp_t *l3, l3info_t info){
-//     do{
-//         if (*l3 != NULL)
-//             l3_release(*l3);
-//         *l3 = l3_prepare(info);
-//     }
-//     while (l3_getSets(*l3) != EXPECTED_SETS);
-    
-    
-//     if (*l3 == NULL) {
-//         fprintf(stderr, "FATAL: l3_prepare failed. Are hugepages enabled? (sudo sysctl -w vm.nr_hugepages=1024)\n");
-//         return;
-//     }
-// }
-
-
-
-void prepareL3(l3pp_t *l3) {
+void prepareL3(l3pp_t *l3, int enablePTE) {
     l3info_t l3i = (l3info_t)malloc(sizeof(struct l3info));
     if (!l3i) {
         fprintf(stderr, "Failed to allocate l3info\n");
@@ -53,7 +36,7 @@ void prepareL3(l3pp_t *l3) {
     do{
         if (*l3 != NULL)
             l3_release(*l3);
-        *l3 = l3_prepare(l3i, NULL);
+        *l3 = l3_prepare(l3i, NULL, enablePTE);
     }
     while (l3_getSets(*l3) != EXPECTED_SETS);
     
@@ -70,6 +53,37 @@ void prepareL3(l3pp_t *l3) {
 
     free(l3i);
 }
+
+
+
+l3pp_t prepareBackedL3(const char *backing_file){
+    
+    uint64_t start_cycles = 0;
+    uint64_t end_cycles = 0;
+    printf("Filling l3info structure...\n");
+    start_cycles = rdtscp64();
+    l3pp_t l3 = NULL;
+    do{
+        if (l3 != NULL)
+            l3_release(l3);
+        l3 = l3_prepare_backed(backing_file);
+    }
+    while (l3_getSets(l3) != EXPECTED_SETS);
+    
+    end_cycles = rdtscp64();
+    
+    double time_cycles = (double)((end_cycles - start_cycles) / CLOCK_SPEED) * 1e3; // in ms
+    printf("L3 preparation took VIA CYCLES: %.3f ms\n", time_cycles);
+
+    if (l3) {
+        printf("L3 Cache Sets: %d\n", l3_getSets(l3));
+        printf("L3 Cache Slices: %d\n", l3_getSlices(l3));
+        printf("L3 Cache num of lines: %d\n", l3_getAssociativity(l3));
+    }
+
+    return l3;
+}
+
 
 
 // l3pp_t prepareDeterministicL3(const char *mapping_file, char *hugePage_file, int num_sets, int ways){
@@ -391,6 +405,60 @@ void **fill_eviction_sets(void *buffer, size_t buf_size, uint64_t *phys_addr_buf
 
     free(virt_addrs); 
     
-    printf("[Utils] Reconstructed %d eviction sets in buffer %p.\n", reconstructed_count, buffer);
+    printf("[Utils] Reconstructed %d eviction sets in buffer PA=0x%lx; VA=%p.\n", reconstructed_count, virt_to_phys(buffer), buffer);
     return eviction_sets;
+}
+
+
+int check_hugepage_contiguity(const char *path, size_t buf_size) {
+    int fd = open(path, O_RDWR);
+    if (fd < 0) {
+        perror("[Contiguity Check] Cannot open hugepage file");
+        return -1;
+    }
+
+    void *buf = mmap(NULL, buf_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+
+    if (buf == MAP_FAILED) {
+        perror("[Contiguity Check] mmap failed");
+        return -1;
+    }
+
+    int num_pages = buf_size / HUGE_PAGE_SIZE;
+    
+    // Touch each page to ensure it's allocated
+    for (int i = 0; i < num_pages; i++) {
+        ((volatile char *)buf)[i * HUGE_PAGE_SIZE] = 0;
+    }
+
+    printf("\n=== Hugepage Contiguity Check: %s ===\n", path);
+    printf("%-4s  %-18s  %-18s  %s\n", "Page", "Virtual Addr", "Physical Addr", "Contiguous?");
+    printf("----  ------------------  ------------------  -----------\n");
+
+    uint64_t prev_phys = 0;
+    int all_contiguous = 1;
+
+    for (int i = 0; i < num_pages; i++) {
+        void *vaddr = buf + (i * HUGE_PAGE_SIZE);
+        uint64_t phys = virt_to_phys(vaddr);
+
+        const char *status = "";
+        if (i > 0) {
+            if (phys == prev_phys + HUGE_PAGE_SIZE) {
+                status = "YES";
+            } else {
+                status = "NO";
+                all_contiguous = 0;
+            }
+        }
+
+        printf("%-4d  0x%016lx  0x%016lx  %s\n", i, (uintptr_t)vaddr, phys, status);
+        prev_phys = phys;
+    }
+
+    printf("\n==> Result: %s\n\n", all_contiguous ? "ALL CONTIGUOUS ✓" : "NOT CONTIGUOUS ✗");
+
+    munmap(buf, buf_size);
+    return all_contiguous;
 }

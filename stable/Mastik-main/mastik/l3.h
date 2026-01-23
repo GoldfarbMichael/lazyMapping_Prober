@@ -55,7 +55,7 @@ typedef struct l3info *l3info_t;
 
 #define L3_CACHELINE 64
 
-l3pp_t l3_prepare(l3info_t l3info, mm_t mm);
+l3pp_t l3_prepare(l3info_t l3info, mm_t mm, int enablePTE); 
 void l3_release(l3pp_t l3);
 
 // Returns the number of probed sets in the LLC
@@ -96,6 +96,10 @@ void fillL3Info(l3info_t l3info);
 
 void l3_testHeaders(int dummy);
 void **l3_get_eviction_sets(l3pp_t l3);
-
+l3pp_t l3_prepare_backed(const char *backing_file_path);
+void l3_print_l3buffer_pas(l3pp_t l3);
+void l3_dump_groups(l3pp_t l3, const char *filename);
+void l3_dump_l3memory_pas(l3pp_t l3);
+void enable_PTE_flag(mm_t mm);
 #endif // __L3_H__
 

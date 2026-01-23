@@ -54,6 +54,37 @@ static void *allocate_buffer(mm_t mm)
   int bufsize;
   char *buffer = MAP_FAILED;
   bufsize = mm->l3info.bufsize;
+  // printf("[DEBUG] Mastik: mm.c: allocate_buffer Allocating MM buffer of size %d bytes\n", bufsize);
+  // ============================================ START My addition: Backing File Support ============================================
+  if (mm->backing_file != NULL && vl_len(mm->memory) == 0) {
+    printf("Mastik: Using backing file %s for mm allocation\n", mm->backing_file);
+    // We use O_CREAT so it works even if file doesn't exist yet
+    int fd = open(mm->backing_file, O_RDWR | O_CREAT, 0666);
+    if (fd < 0) {
+      perror("Mastik Error: Failed to open backing file");
+      exit(-1); // Fail hard so we don't silently probe random memory
+    }
+
+    // Note: When using a backing file in /dev/hugepages, standard mmap is sufficient.
+    // The kernel handles the hugepage alignment because of the filesystem type.
+    buffer = mmap(NULL, bufsize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    
+    close(fd); // Valid to close after mmap
+    bzero(buffer, bufsize);
+    
+    if (buffer == MAP_FAILED) {
+      perror("Mastik Error: Failed to mmap backing file");
+      exit(-1);
+    }    
+    // Force hugepage settings if we are in /dev/hugepages
+    mm->pagesize = HUGEPAGESIZE;
+    mm->pagetype = PAGETYPE_HUGE;
+    mm->l3groupsize = L3_GROUPSIZE_FOR_HUGEPAGES;
+
+    return buffer;
+  }
+  // ============================================ END My addition: Backing File Support ============================================
+
 #ifdef HUGEPAGES
   if ((mm->l3info.flags & L3FLAG_NOHUGEPAGES) == 0)
   {
@@ -136,6 +167,7 @@ int mm_initialisel3(mm_t mm)
 {
   if (mm->l3groups == NULL)
   {
+    printf("[DEBUG] Mastik; mm.c; mm_initialisel3; mm->l3buffer = allocate_buffer(mm);\n");
     mm->l3buffer = allocate_buffer(mm);
     // Create the cache map
     if (!ptemap(mm))
@@ -143,6 +175,7 @@ int mm_initialisel3(mm_t mm)
       printf("PTEmap failed! Falling back to probemap\n");
       if (!probemap(mm))
       {
+        printf("Probemap failed Returning!\n");
         free(mm->l3buffer);
         return 0;
       }
@@ -162,15 +195,18 @@ static void mm_l3findlines(mm_t mm, int set, int count, vlist_t list)
   while (count > 0)
   {
     int list_len = vl_len(mm->memory);
+    // printf("[DEBUG] Mastik: mm_l3findlines: vl_len(mm->memory): %d\n", list_len);
     for (; i < list_len; i++)
     {
       void *buf = vl_get(mm->memory, i);
-
+      // printf("[DEBUG] Mastik: mm_l3findlines: Buffer address (*buf = vl_get(mm->memory, i)) %p; mm->memory address %p\n", buf, mm->memory);
       int groupOffset = set % mm->l3groupsize;
+      // printf("[DEBUG] Mastik: mm_l3findlines: mm->l3ngroups %d\n", mm->l3ngroups);
 
       for (uintptr_t offset = 0; offset < mm->l3info.bufsize; offset += mm->l3groupsize * LX_CACHELINE)
       {
         void *cand = buf + offset;
+        // printf("[DEBUG] Mastik: mm_l3findlines: Candidate group ID  %ld candidate address %p\n", GET_GROUP_ID(cand), cand);
 
         if (GET_GROUP_ID(cand) == 0)
         {
@@ -180,6 +216,7 @@ static void mm_l3findlines(mm_t mm, int set, int count, vlist_t list)
             vlist_t es = mm->l3groups[group_id];
             if (checkevict(es, cand))
             {
+              // printf("[DEBUG] Mastik: mm_l3findlines: es LEN %d\n", vl_len(es));
               SET_GROUP_ID(cand, group_id + 1);
               break;
             }
@@ -191,12 +228,15 @@ static void mm_l3findlines(mm_t mm, int set, int count, vlist_t list)
           {
             SET_ALLOCATED_FLAG(cand, groupOffset * L3_CACHELINE);
             vl_push(list, cand + groupOffset * L3_CACHELINE);
-            if (--count == 0)
+            if (--count == 0){
+              // printf("[DEBUG] Mastik: mm_l3findlines: Found all requested lines. RETURNED BEFORE vl_push(mm->memory, allocate_buffer(mm));\n");
               return;
+            }
           }
         }
       }
     }
+    // printf("[DEBUG] Mastik: mm_l3findlines: ALLOCATING NEW BUFFER FOR eSet;\n");
     vl_push(mm->memory, allocate_buffer(mm));
   }
   return;
@@ -284,16 +324,24 @@ static uintptr_t getphysaddr(void *p)
 
 static int ptemap(mm_t mm)
 {
-  if ((mm->l3info.flags & L3FLAG_USEPTE) == 0)
+  if ((mm->l3info.flags & L3FLAG_USEPTE) == 0){
+    printf("PTE FAILED IN FLAGS \n");
+    
     return 0;
-  if (getphysaddr(mm->l3buffer) == 0)
+  }
+  if (getphysaddr(mm->l3buffer) == 0){
+    printf("GET PHYSICAL ADDRESS FAILED\n");
+   
     return 0;
-  if (mm->l3info.slices & (mm->l3info.slices - 1)) // Cannot do non-linear for now
+  }
+  if (mm->l3info.slices & (mm->l3info.slices - 1)){ // Cannot do non-linear for now
+    printf("PTE FAILED IN SLICES \n\n");
     return 0;
+  }
   // mm->l3info.sets is equal to sets per slice
   mm->l3ngroups = mm->l3info.sets * mm->l3info.slices / mm->l3groupsize;
   mm->l3groups = (vlist_t *)calloc(mm->l3ngroups, sizeof(vlist_t));
-
+  printf("Mastik: Initialising PTE map with %d groups; %d sets; %d slices\n", mm->l3ngroups, mm->l3info.sets, mm->l3info.slices);
   for (int i = 0; i < mm->l3ngroups; i++)
     mm->l3groups[i] = vl_new();
 
@@ -502,6 +550,8 @@ static void collect(vlist_t es, vlist_t candidates, vlist_t set)
 
 static vlist_t map(mm_t mm, vlist_t lines)
 {
+    printf("[DEBUG] Mastik: mm.c: Using LINEAR MAP\n");
+
 #ifdef DEBUG
   printf("%d lines\n", vl_len(lines));
 #endif // DEBUG
@@ -559,12 +609,15 @@ static vlist_t map(mm_t mm, vlist_t lines)
 
 static vlist_t quadraticmap(mm_t mm, vlist_t lines)
 {
+  printf("[DEBUG] Mastik: mm.c: Using QUADRATIC MAP\n");
 #ifdef DEBUG
   printf("%d lines\n", vl_len(lines));
 #endif // DEBUG
   vlist_t groups = vl_new();
   vlist_t es = vl_new();
   int nlines = vl_len(lines);
+    printf("[DEBUG] Mastik: mm.c: quadraticmap; nlines(pages) = %d\n", nlines);
+
   int fail = 0;
   while (vl_len(lines))
   {
@@ -654,6 +707,7 @@ static int probemap(mm_t mm)
   mm->l3groups = (vlist_t *)calloc(mm->l3ngroups, sizeof(vlist_t));
   for (int i = 0; i < vl_len(groups); i++)
     mm->l3groups[i] = vl_get(groups, i);
+  printf("mm->l3groups is not NULL\n");
   vl_free(groups);
   vl_free(pages);
   return 1;
@@ -715,4 +769,30 @@ void mm_returnlines(mm_t mm, void **lines, int count)
   {
     mm_returnline(mm, lines[i]);
   }
+}
+
+
+mm_t mm_prepare_with_BackUpFile(lxinfo_t l1info, lxinfo_t l2info, lxinfo_t l3info, const char* backing_file)
+{
+  mm_t mm = calloc(1, sizeof(struct mm));
+
+  if (backing_file != NULL)
+    mm->backing_file = backing_file;
+  
+
+  if (l1info)
+    bcopy(l1info, &mm->l1info, sizeof(struct lxinfo));
+  if (l2info)
+    bcopy(l2info, &mm->l2info, sizeof(struct lxinfo));
+  if (l3info)
+    bcopy(l3info, &mm->l3info, sizeof(struct lxinfo));
+
+  fillL1Info((l1info_t)&mm->l1info);
+  fillL2Info((l2info_t)&mm->l2info);
+  fillL3Info((l3info_t)&mm->l3info);
+
+  mm->memory = vl_new();
+  vl_push(mm->memory, allocate_buffer(mm));
+
+  return mm;
 }

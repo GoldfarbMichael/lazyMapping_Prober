@@ -8,7 +8,7 @@
 
 
 
-void dump_eSets_to_txt(void **e_sets, int numOfSets, const char *filename){
+void dump_eSets_to_txt(void **e_sets, int numOfSets, const char *filename, int enableVA){
         FILE *fp = fopen(filename, "w");
     if (!fp) {
         perror("Error opening file");
@@ -32,8 +32,12 @@ void dump_eSets_to_txt(void **e_sets, int numOfSets, const char *filename){
         // We assume pointer chasing: the content of 'curr' is the address of 'next'
         do {
             uintptr_t pa = virt_to_phys(curr);
-            // fprintf(fp, "address %d: PA=0x%lx; VA=0x%lx\n", i, pa, (uintptr_t)curr);
-            fprintf(fp, "address %d: PA=0x%lx \n", i, pa);
+            if(enableVA){
+                fprintf(fp, "address %d: PA=0x%lx; VA=0x%lx\n", i, pa, (uintptr_t)curr);
+            } else {
+                fprintf(fp, "address %d: PA=0x%lx \n", i, pa);
+            }
+    
             
             // Move to next: dereference the pointer to get the next address
             curr = *(void **)curr;
@@ -123,7 +127,9 @@ int test_mapping_BIN_reconstruction_to_eSets(const char *mapping_file, const cha
         return 1;
     }
 
-    dump_eSets_to_txt(e_sets, sets, dump_file);
+    dump_eSets_to_txt(e_sets, sets, dump_file, 0);
+    free(e_sets);
+    free(phys_map);
     return 0;
 
 }
@@ -157,7 +163,7 @@ int test_mapping_BIN_reconstruction_to_eSets(const char *mapping_file, const cha
 //         return 1;
 //     }
 
-//     dump_eSets_to_txt(e_sets, sets, dump_file);
+//     dump_eSets_to_txt(e_sets, sets, dump_file, 0);
 
 
 
@@ -170,7 +176,7 @@ int test_mapping_BIN_reconstruction_to_eSets(const char *mapping_file, const cha
 //     if (!l3) return 1;
 //     printf("L3 Prepared Deterministically.\n");
 //     void **new_eSets = l3_get_eviction_sets(l3);
-//     dump_eSets_to_txt(new_eSets, sets, "dump_deter_reconstructed_via_l3.txt");
+//     dump_eSets_to_txt(new_eSets, sets, "dump_deter_reconstructed_via_l3.txt", 0);
 //     l3_release(l3);
 //     free(new_eSets);
 //     free(e_sets);

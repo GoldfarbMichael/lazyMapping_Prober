@@ -2,13 +2,15 @@
 #define UTILS_H
 
 #include <stdint.h>
-#include <mastik/l3.h>
+#include "mastik/l3.h"
 
 #define CLOCK_SPEED 3.1e9 // 3.1 GHz
 
 // void prepareL3(l3pp_t *l3, l3info_t info);
 
-void prepareL3(l3pp_t *l3);
+void prepareL3(l3pp_t *l3, int enablePTE);
+
+l3pp_t prepareBackedL3(const char *backing_file);
 
 
 // l3pp_t prepareDeterministicL3(const char *mapping_file, char *hugePage_file, int num_sets, int ways);
@@ -36,4 +38,6 @@ void **phys_to_virt_buffer(void *buffer, size_t buf_size, uint64_t *phys_addr_bu
 // (Does not need l3pp_t)
 void **fill_eviction_sets(void *buffer, size_t buf_size, uint64_t *phys_addr_buffer, int total_sets, int ways);
 
+
+int check_hugepage_contiguity(const char *path, size_t buf_size);
 #endif
