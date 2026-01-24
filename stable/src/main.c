@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <mastik/l3.h>
 #include <mastik/util.h>
+#include <mastik/impl.h>
 #include <sys/mman.h>
 
 
@@ -19,9 +20,17 @@
 #define MAPPING_FILE_A "mapping_A.bin"
 #define MAPPING_FILE_B "mapping_B.bin"
 
+#define MAX_NUM_GROUPS 64
+
+typedef struct {
+    int **lazyGroupsArr;           // 2D array: lazyGroupsArr[group][index] = set index
+    int counts[MAX_NUM_GROUPS];    // Number of e_sets in each group
+    int lazyGroupSize;             // Max capacity per group
+} lazyGroups_t;
+
+
 void monitorSlice(l3pp_t l3, int slice) {
-    // int sets_per_slice = l3_getSets(l3) / l3_getSlices(l3);
-    int sets_per_slice = 1024;
+    int sets_per_slice = l3_getSets(l3) / l3_getSlices(l3);
 
     int start_set = slice * sets_per_slice;
     int end_set = start_set + sets_per_slice;
@@ -34,15 +43,14 @@ void monitorSlice(l3pp_t l3, int slice) {
 
 
 void monitorSlice_manual(l3pp_t l3, int slice, void** e_sets) {
-    // int sets_per_slice = 1024;
-    // int start_set = (slice * sets_per_slice)+1024;
+   
 
     int sets_per_slice = l3_getSets(l3) / l3_getSlices(l3);
     int start_set = slice * sets_per_slice;
     
 
-    // int end_set = start_set + sets_per_slice;
-    int end_set = start_set + 1024;
+    int end_set = start_set + sets_per_slice;
+
     
     l3_unmonitorall(l3);
     for (int s = start_set; s < end_set; s++) {
@@ -51,104 +59,152 @@ void monitorSlice_manual(l3pp_t l3, int slice, void** e_sets) {
 }
 
 
+
+/*
+ * Converts an array of Mastik eviction sets into a group_t array.
+ * Groups are determined by bits 7-11 of the address (merging adjacent lines).
+ * * e_sets: Array of pointers to linked lists (from get_eviction_sets_via_offsets)
+ * num_sets: Size of the e_sets array (e.g., from l3_getSets)
+ */
+lazyGroups_t* eviction_sets_to_groups(void **e_sets, int num_sets) {
+    if (!e_sets) return NULL;
+
+    // Allocate the main struct
+    lazyGroups_t *lazyGroups = (lazyGroups_t *)malloc(sizeof(lazyGroups_t));
+    if (!lazyGroups) {
+        perror("malloc lazyGroups");
+        return NULL;
+    }
+
+    int lazyGroupSize = num_sets / MAX_NUM_GROUPS;
+    lazyGroups->lazyGroupSize = lazyGroupSize;
+
+    // Initialize counts to zero
+    memset(lazyGroups->counts, 0, sizeof(lazyGroups->counts));
+
+    // Allocate the 2D array for group indices
+    lazyGroups->lazyGroupsArr = (int **)malloc(MAX_NUM_GROUPS * sizeof(int *));
+    if (!lazyGroups->lazyGroupsArr) {
+        perror("malloc lazyGroupsArr");
+        free(lazyGroups);
+        return NULL;
+    }
+
+    // Allocate each group's array
+    for (int g = 0; g < MAX_NUM_GROUPS; g++) {
+        lazyGroups->lazyGroupsArr[g] = (int *)malloc(lazyGroupSize * sizeof(int));
+        if (!lazyGroups->lazyGroupsArr[g]) {
+            perror("malloc lazyGroup");
+            // Free previously allocated groups
+            for (int j = 0; j < g; j++) {
+                free(lazyGroups->lazyGroupsArr[j]);
+            }
+            free(lazyGroups->lazyGroupsArr);
+            free(lazyGroups);
+            return NULL;
+        }
+        memset(lazyGroups->lazyGroupsArr[g], -1, lazyGroupSize * sizeof(int)); // -1 = empty
+    }
+
+
+    int shiftRight;
+    int andTarget;
+    if (MAX_NUM_GROUPS == 64) {
+        shiftRight = 6;
+        andTarget = 0x3F;
+    } else if (MAX_NUM_GROUPS == 32) {
+        shiftRight = 7;
+        andTarget = 0x1F;
+    } else if (MAX_NUM_GROUPS == 16) {
+        shiftRight = 8;
+        andTarget = 0x0F;
+    } else {
+        fprintf(stderr, "Unsupported MAX_NUM_GROUPS value\n");
+        free(lazyGroups);
+        return NULL;
+    }
+
+
+    // Iterate through all eviction sets
+    for (int i = 0; i < num_sets; i++) {
+        if (e_sets[i] == NULL) continue;
+
+        void *curr = e_sets[i];
+        int headIdx = ((uintptr_t)curr >> shiftRight) & andTarget;
+
+        // Validate: traverse the circular linked list
+        int valid = 1;
+        do {
+            uintptr_t addr_val = (uintptr_t)curr;
+            int group_idx = (addr_val >> shiftRight) & andTarget;
+            if (group_idx != headIdx || group_idx >= MAX_NUM_GROUPS) {
+                printf("GroupID doesn't match head Group id OR group id >= MAX_NUM_GROUPS --> e_set[%d]\n", i);
+                valid = 0;
+                break;
+            }
+            curr = LNEXT(curr);
+        } while (curr != e_sets[i]);
+
+        // If valid, assign the e_set index to the group
+        if (valid) {
+            int group = headIdx;
+            int count = lazyGroups->counts[group];
+            if (count < lazyGroupSize) {
+                lazyGroups->lazyGroupsArr[group][count] = i;
+                lazyGroups->counts[group]++;
+            } else {
+                fprintf(stderr, "Warning: Group %d overflow at set %d\n", group, i);
+            }
+        }
+    }
+
+    return lazyGroups;
+}
+
+
+
+// Helper function to free lazyGroups_t
+void free_lazyGroups(lazyGroups_t *lazyGroups) {
+    if (!lazyGroups) return;
+    
+    if (lazyGroups->lazyGroupsArr) {
+        for (int g = 0; g < MAX_NUM_GROUPS; g++) {
+            free(lazyGroups->lazyGroupsArr[g]);
+        }
+        free(lazyGroups->lazyGroupsArr);
+    }
+    free(lazyGroups);
+}
+
+
+
+void dump_lazyGroups_to_file(lazyGroups_t *lazyGroups, const char *filename) {
+    if (!lazyGroups || !filename) {
+        fprintf(stderr, "Invalid arguments to dump_lazyGroups_to_file\n");
+        return;
+    }
+
+    FILE *fp = fopen(filename, "w");
+    if (!fp) {
+        perror("Failed to open file for lazyGroups dump");
+        return;
+    }
+
+    for (int g = 0; g < MAX_NUM_GROUPS; g++) {
+        fprintf(fp, "====lazygroup%d - has %d sets====\n", g, lazyGroups->counts[g]);
+        
+        for (int i = 0; i < lazyGroups->counts[g]; i++) {
+            fprintf(fp, "set%d\n", lazyGroups->lazyGroupsArr[g][i]);
+        }
+    }
+
+    fclose(fp);
+    printf("Dumped lazyGroups to %s\n", filename);
+}
+
+
 int main(int argc, char **argv) {
     printf("=== Mastik L3 Cache Mapping and Probing Test ===\n");
-
-
-    // l3pp_t l3 = prepareDeterministicL3(MAPPING_FILE_A, HUGEPAGE_PATH_A, 16384, 12);
-    // if(!l3) {
-    //     fprintf(stderr, "Failed to prepare attacker L3 structure.\n");
-    //     return 1;
-    // }
-    // l3pp_t l3B = prepareDeterministicL3(MAPPING_FILE_B, HUGEPAGE_PATH_B, 16384, 12);
-    // if(!l3B) {
-    //     fprintf(stderr, "Failed to prepare victim L3 structure.\n");
-    //     l3_release(l3);
-    //     return 1;
-    // }
-    // sleep(1);
-
-    // // struct l3info infoA;
-    // // memset(&infoA, 0, sizeof(infoA));
-    // // infoA.backing_file = HUGEPAGE_PATH_A;
-    // // l3pp_t l3_attacker = NULL;
-    // // prepareL3(&l3_attacker, &infoA);
-
-    
-
-    // // sleep(3);
-    // // struct l3info infoB;
-    // // memset(&infoB, 0, sizeof(infoB));
-    // // infoB.backing_file = HUGEPAGE_PATH_B;
-    // // l3pp_t l3_victim = NULL;
-    // // prepareL3(&l3_victim, &infoB);
-
-    // int setsPerSlice = l3_getSets(l3) / l3_getSlices(l3);
-    // monitorSlice(l3, 0); // Attacker monitors slice 0
-    // uint16_t *resAttacker = (uint16_t*) calloc(setsPerSlice, sizeof(uint16_t));
-    // // GET_PLACE macro can return indices 0-31, so we need at least 32 elements
-    // uint16_t *resVictim = (uint16_t*) calloc(32, sizeof(uint16_t));
-    // uint16_t *finalResVictim = (uint16_t*) calloc(l3_getSets(l3B), sizeof(uint16_t));
-    // // zero out finalResVictim
-    // memset(finalResVictim, 0, l3_getSets(l3B) * sizeof(uint16_t));
-    
-    // for (int i = 0; i < l3_getSets(l3B); i++) {
-    //     // Victim accesses its monitored set
-    //     //zero out resVictim
-    //     memset(resVictim, 0, 32 * sizeof(uint16_t));
-    //     l3_unmonitorall(l3B);
-    //     l3_monitor(l3B, i); 
-    //     l3_bprobecount(l3B, resVictim);
-
-    //     l3_probecount(l3, resAttacker);
-
-    //     l3_probecount(l3B,resVictim);
-    //     finalResVictim[i] = resVictim[0];
-
-    // }
-
-    // sleep(3);
-    // printf("Victim Probecount Results:\n");
-    // // log final results into a file
-    // FILE *fp = fopen("victim_probecount_results.txt", "w");
-    // if (!fp) {
-    //     perror("Failed to open output file");
-    //     return 1;
-    // }
-    // for (int i = 0; i < l3_getSets(l3B); i++) {
-    //     // printf("Set %d: %d\n", i, finalResVictim[i]);
-    //     fprintf(fp, "Set %d: %u\n", i, finalResVictim[i]);
-    // }
-    // fclose(fp);
-
-
-
-    // l3_release(l3);
-    // l3_release(l3B);
-    // free(resAttacker);
-    // free(resVictim);
-    // free(finalResVictim);
-
-// ------------------------------- End of l3_prepare_deterministic test -------------------------------
-
-
-
-
-
-
-    // if (test_mapping_BIN_reconstruction_to_eSets(MAPPING_FILE_A, HUGEPAGE_PATH_A, "dump_reconstructed.txt") != 0) {
-    //     fprintf(stderr, "Reconstruction Test failed.\n");
-    // }
-
-    //   if (test_mapping_l3_prepare_deterministic(MAPPING_FILE_B, HUGEPAGE_PATH_B, "dump_reconstructed.txt") != 0) {
-    //     fprintf(stderr, "Reconstruction Test failed.\n");
-    // }
-
-
-
-    // free(e_sets);
-    // l3_release(l3);
-
 
 
 
@@ -235,60 +291,18 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-
-
+    // int *transTable = get_transTable(l3, l3B, e_setsA, e_setsB, 16, 1024, 12,0);
+    
+    // sync_eSetsB_to_eSetsA(e_setsB, 1024, 16, transTable);
+    // printf("\nfnished Syncing\n\n");
 
 
 // ============================================ START: 1 slice Probe tests ============================================
 
 
-    int setsPerSlice = l3_getSets(l3) / l3_getSlices(l3);
+    // get_transTable(l3, l3B, e_setsA, e_setsB, 16, 1024, 12,1);
 
-    for(int slice = 0; slice < l3_getSlices(l3); slice++){
-        printf("Monitoring whole slice\n");
-        // monitorSlice(l3, slice); // Attacker monitors slice 0
-        monitorSlice_manual(l3, slice, e_setsA); // Victim monitors same slice
-
-        uint16_t *resAttacker = (uint16_t*) calloc(setsPerSlice, sizeof(uint16_t));
-        // GET_PLACE macro can return indices 0-31, so we need at least 32 elements
-        uint16_t *resVictim = (uint16_t*) calloc(1, sizeof(uint16_t));
-        uint16_t *finalResVictim = (uint16_t*) calloc(l3_getSets(l3B), sizeof(uint16_t));
-        // zero out finalResVictim
-        memset(finalResVictim, 0, l3_getSets(l3B) * sizeof(uint16_t));
-        printf("Starting %d-slice probe tests...\n", slice);
-        for (int i = 0; i < l3_getSets(l3B); i++) {
-            // Victim accesses its monitored set
-            //zero out resVictim
-            memset(resVictim, 0, sizeof(uint16_t));
-            l3_unmonitorall(l3B);
-            // l3_monitor(l3B, i); 
-            l3_monitor_manual(l3B, i, e_setsB[i]);
-            // l3_bprobecount(l3B, resVictim);
-            l3_bprobecount(l3B, resVictim);
-
-            l3_probecount(l3, resAttacker);
-
-            l3_probecount(l3B,resVictim);
-            finalResVictim[i] = resVictim[0];
-
-        }
-
-        sleep(1);
-        printf("Victim Probecount Results:\n");
-        // log final results into a file
-        char filename[256];
-        snprintf(filename, sizeof(filename), "victim_probecount_results%d.txt", slice);
-        FILE *fp = fopen(filename, "w");
-        if (!fp) {
-            perror("Failed to open output file");
-            return 1;
-        }
-        for (int i = 0; i < l3_getSets(l3B); i++) {
-            // printf("Set %d: %d\n", i, finalResVictim[i]);
-            fprintf(fp, "Set %d: %u\n", i, finalResVictim[i]);
-        }
-        fclose(fp);
-    }
+    // save_physical_mapping(l3B, e_setsB, MAPPING_FILE_B);
 
 // ******************************************** END: 1 slice Probe tests ********************************************
 
@@ -407,8 +421,15 @@ int main(int argc, char **argv) {
     // l3_probecount(l3, resT);
     // printf("222Probing Set 0, Result: %u\n", resT[0]);
 
-
-
+    lazyGroups_t *groups = eviction_sets_to_groups(e_setsA, sets);
+    if (groups) {
+        printf("Group 0 has %d sets\n", groups->counts[0]);
+        printf("First set in group 0: %d\n", groups->lazyGroupsArr[0][0]);
+        
+        dump_lazyGroups_to_file(groups, "lazygroups_dump.txt");
+        
+        free_lazyGroups(groups);
+    }
 
     l3_release(l3);
     l3_release(l3B);

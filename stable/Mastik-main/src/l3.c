@@ -622,3 +622,138 @@ int l3_monitor_manual(l3pp_t l3, int setIndex, void *setHead) {
 
     return 1;
 }
+
+
+
+void monitorGroup_manual(l3pp_t l3, int group, int setsPerGroup,void** e_sets) {
+   
+    int start_set = group * setsPerGroup; 
+    int end_set = start_set + setsPerGroup;
+    
+    l3_unmonitorall(l3);
+    for (int s = start_set; s < end_set; s++) {
+        l3_monitor_manual(l3, s, e_sets[s]);
+    }
+}
+
+
+
+int get_active_group(uint16_t *res, int setsPerGroup, int resSize, int associativity){
+    int maxMisses = setsPerGroup * associativity;
+    int groupIndex = -1;
+    int numOfGroups = resSize/setsPerGroup;
+    float *groupMisses = (float *)calloc(numOfGroups, sizeof(float));
+    memset(groupMisses, 0, numOfGroups * sizeof(int));
+
+    for(int set = 0; set < resSize; set++){
+        if (set % setsPerGroup == 0)
+            groupIndex++;
+        groupMisses[groupIndex] += res[set];
+    }
+    float maxGroupMisses = 0;
+    int activeGroup = -1;
+    for(int g=0; g < numOfGroups; g++){
+        groupMisses[g] = groupMisses[g]/(float)maxMisses;
+        if(groupMisses[g] > maxGroupMisses){
+            maxGroupMisses = groupMisses[g];
+            activeGroup = g;
+        }
+    }
+    printf("active group is - %d, with %f percent activity\n", activeGroup, groupMisses[activeGroup]);
+    free(groupMisses);
+    return activeGroup;
+}
+
+int* get_transTable(l3pp_t l3, l3pp_t l3B, void **e_setsA, void ** e_setsB, int numOfGroups, int setsPerGroup, int associativity, int dumpToFiles){
+
+    int *transTable = (int *)calloc(numOfGroups, sizeof(int));
+
+    uint16_t *resAttacker = (uint16_t*) calloc(setsPerGroup, sizeof(uint16_t));
+    uint16_t *resVictim = (uint16_t*) calloc(1, sizeof(uint16_t));
+    uint16_t *finalResVictim = (uint16_t*) calloc(l3_getSets(l3B), sizeof(uint16_t));
+
+    // for(int slice = 0; slice < l3_getSlices(l3); slice++){
+    for(int group = 0; group < numOfGroups; group++){
+
+        printf("Monitoring whole group\n");
+        monitorGroup_manual(l3, group, setsPerGroup, e_setsA); 
+
+        // zero out finalResVictim
+        memset(finalResVictim, 0, l3_getSets(l3B) * sizeof(uint16_t));
+        memset(resAttacker, 0, setsPerGroup * sizeof(uint16_t));
+        memset(resVictim, 0, sizeof(uint16_t));
+        printf("Starting %d-group probe tests...\n", group);
+        for (int i = 0; i < l3_getSets(l3B); i++) {
+            // Victim accesses its monitored set
+            //zero out resVictim
+            memset(resVictim, 0, sizeof(uint16_t));
+            l3_unmonitorall(l3B);
+            l3_monitor_manual(l3B, i, e_setsB[i]);
+            l3_bprobecount(l3B, resVictim);
+
+            l3_probecount(l3, resAttacker);
+
+            l3_probecount(l3B,resVictim);
+            finalResVictim[i] = resVictim[0];
+
+        }
+
+        transTable[group] = get_active_group(finalResVictim, setsPerGroup, l3_getSets(l3B), associativity);
+
+        if (dumpToFiles == 1){
+            sleep(1);
+            // log final results into a file
+            char filename[256];
+            snprintf(filename, sizeof(filename), "victim_probecount_results%d.txt", group);
+            FILE *fp = fopen(filename, "w");
+            if (!fp) {
+                perror("Failed to open output file");
+                return NULL;
+            }
+            for (int i = 0; i < l3_getSets(l3B); i++) {
+                // printf("Set %d: %d\n", i, finalResVictim[i]);
+                fprintf(fp, "Set %d: %u\n", i, finalResVictim[i]);
+            }
+            fclose(fp);
+        }
+    
+    
+    }
+    return transTable;
+}
+
+
+// ** updates e_setsB such it will sync up with e_setsA.
+// Reorders e_setsB in chunks of setsPerGroup based on transTable.
+// transTable[newGroup] = oldGroup
+void sync_eSetsB_to_eSetsA(void ** e_setsB, int setsPerGroup, int numOfGroups, int* transTable){
+    
+    // Allocate temporary array to hold the reordered pointers
+    int totalSets = setsPerGroup * numOfGroups;
+    void **temp = (void **)malloc(totalSets * sizeof(void *));
+    if (!temp) {
+        fprintf(stderr, "Failed to allocate temp array for sync\n");
+        return;
+    }
+    
+    // Copy pointers to new positions based on transTable
+    for (int newGroup = 0; newGroup < numOfGroups; newGroup++) {
+        int oldGroup = transTable[newGroup];
+        
+        int newStartIdx = newGroup * setsPerGroup;
+        int oldStartIdx = oldGroup * setsPerGroup;
+        
+        // Move all sets from old group position to new group position
+        for (int i = 0; i < setsPerGroup; i++) {
+            temp[newStartIdx + i] = e_setsB[oldStartIdx + i];
+        }
+    }
+    
+    // Copy back to e_setsB
+    for (int i = 0; i < totalSets; i++) {
+        e_setsB[i] = temp[i];
+    }
+    
+    free(temp);
+    
+}

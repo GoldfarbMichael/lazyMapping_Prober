@@ -102,5 +102,10 @@ void l3_dump_groups(l3pp_t l3, const char *filename);
 void l3_dump_l3memory_pas(l3pp_t l3);
 void enable_PTE_flag(mm_t mm);
 int l3_monitor_manual(l3pp_t l3, int setIndex, void *setHead);
+
+void monitorGroup_manual(l3pp_t l3, int group, int setsPerGroup,void** e_sets);
+int get_active_group(uint16_t *res, int setsPerGroup, int resSize, int associativity);
+int* get_transTable(l3pp_t l3, l3pp_t l3B, void **e_setsA, void ** e_setsB, int numOfGroups, int setsPerGroup, int associativity, int dumpToFiles);
+void sync_eSetsB_to_eSetsA(void ** e_setsB, int setsPerGroup, int numOfGroups, int* transTable);
 #endif // __L3_H__
 
