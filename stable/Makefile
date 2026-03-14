@@ -12,11 +12,11 @@ CFLAGS = -g -O0 -Wall -Wextra -I$(MASTIK_DIR)/src -I$(MASTIK_DIR)
 # LDFLAGS:
 # -L$(MASTIK_DIR)/src : Tells the linker to look in your local folder for libmastik.a
 # -lmastik            : Links the library
-LDFLAGS = -L$(MASTIK_DIR)/src -lmastik
+LDFLAGS = -L$(MASTIK_DIR)/src -lmastik -lm
 
 # Project Files
 # Assuming you moved your code into a 'src' folder inside 'stable'
-SRCS = src/main.c src/utils.c src/tests.c
+SRCS = src/main.c src/utils.c src/tests.c src/mastikElite.c
 OBJS = $(SRCS:.c=.o)
 
 # Executable Name

@@ -7,6 +7,9 @@
 #define CLOCK_SPEED 3.1e9 // 3.1 GHz
 
 // void prepareL3(l3pp_t *l3, l3info_t info);
+static inline void maccessMy(void *p) {
+    __asm__ volatile("movb (%0), %%al" : : "r"(p) : "eax", "memory");
+}
 
 void prepareL3(l3pp_t *l3, int enablePTE);
 

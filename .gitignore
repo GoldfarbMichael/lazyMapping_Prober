@@ -8,7 +8,7 @@ lazyMapping_Prober
 *.txt
 *.patch
 *.bin
-
+*.csv
 # Build artifacts
 *.a
 *.so
@@ -25,3 +25,8 @@ Thumbs.db
 # Temporary files
 *~
 *.tmp
+
+# Doxygen documentation
+stable/Doxyfile
+stable/html/
+stable/latex/
