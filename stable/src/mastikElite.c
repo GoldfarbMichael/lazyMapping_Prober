@@ -269,7 +269,6 @@ void get_spatioTemporal_memoryGram(Clusters_t *Clusters, int NoC, uint64_t TST_c
         return;
     }
 
-
     // 1. Calculate matrix dimensions
     uint64_t total_samples_per_cluster = TST_cycles / (NoC * SST_cycles);
     

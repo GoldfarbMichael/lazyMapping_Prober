@@ -1,14 +1,16 @@
 #define _GNU_SOURCE
+#include <sched.h>
+#include <unistd.h>
+#include <sys/wait.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <stdint.h>
 #include <mastik/l3.h>
 #include <mastik/util.h>
 #include <mastik/impl.h>
 #include <sys/mman.h>
-
+#include <signal.h>
 
 #include "utils.h"
 #include "tests.h"
@@ -22,8 +24,64 @@
 
 
 #define PROBE_ITERATIONS 30
+#define MAX_ARGS 10
 
+typedef struct {
+    char *stressor_name;
+    char *exec_args[MAX_ARGS];
+} StressorConfig;
 
+// Define your massive test battery here. 
+// Note: The array MUST be NULL-terminated for execvp.
+StressorConfig stress_battery[] = {
+    // The Scientifically Validated L3 Thrasher
+    { .stressor_name = "cache", .exec_args = {"stress-ng", "--cache", "1", "--cache-flush", "--cache-level", "3", NULL} },
+    
+    // Algorithmic & Memory Access Stressors
+    { .stressor_name = "bsearch",   .exec_args = {"stress-ng", "--bsearch", "1", "--maximize", NULL} },
+    { .stressor_name = "heapsort",  .exec_args = {"stress-ng", "--heapsort", "1", "--maximize", NULL} },
+    { .stressor_name = "hsearch",   .exec_args = {"stress-ng", "--hsearch", "1", "--maximize", NULL} },
+    // { .stressor_name = "icache",    .exec_args = {"stress-ng", "--icache", "1", NULL} },
+    { .stressor_name = "judy",      .exec_args = {"stress-ng", "--judy", "1", "--maximize", NULL} },
+    { .stressor_name = "lockbus",   .exec_args = {"stress-ng", "--lockbus", "1", NULL} },
+    { .stressor_name = "lsearch",   .exec_args = {"stress-ng", "--lsearch", "1", "--maximize", NULL} },
+    { .stressor_name = "malloc",    .exec_args = {"stress-ng", "--malloc", "1", "--malloc-max", "10000", "--malloc-bytes", "4096", NULL} },
+    { .stressor_name = "matrix",    .exec_args = {"stress-ng", "--matrix", "1", "--maximize", NULL} },
+    // { .stressor_name = "matrix-3d", .exec_args = {"stress-ng", "--matrix-3d", "1", "--matrix-3d-size", "1024", NULL} },
+    { .stressor_name = "membarrier",.exec_args = {"stress-ng", "--membarrier", "1", NULL}},
+    { .stressor_name = "memcpy",    .exec_args = {"stress-ng", "--memcpy", "1", NULL} },
+    { .stressor_name = "mergesort", .exec_args = {"stress-ng", "--mergesort", "1", "--maximize", NULL} },
+    { .stressor_name = "qsort",     .exec_args = {"stress-ng", "--qsort", "1", "--maximize", NULL} },
+    { .stressor_name = "radixsort", .exec_args = {"stress-ng", "--radixsort", "1", "--maximize", NULL} },
+    { .stressor_name = "shellsort", .exec_args = {"stress-ng", "--shellsort", "1", "--maximize", NULL} },
+    { .stressor_name = "skiplist",  .exec_args = {"stress-ng", "--skiplist", "1", "--maximize", NULL} },
+    { .stressor_name = "str",       .exec_args = {"stress-ng", "--str", "1", NULL} },
+    { .stressor_name = "stream",    .exec_args = {"stress-ng", "--stream", "1", "--stream-index", "3", NULL} },
+    { .stressor_name = "tree",      .exec_args = {"stress-ng", "--tree", "1", "--maximize", NULL} },
+    { .stressor_name = "tsearch",   .exec_args = {"stress-ng", "--tsearch", "1", "--maximize", NULL} },
+    { .stressor_name = "vecmath",   .exec_args = {"stress-ng", "--vecmath", "1", NULL} },
+    { .stressor_name = "wcs",       .exec_args = {"stress-ng", "--wcs", "1", NULL} },
+    { .stressor_name = "zlib",      .exec_args = {"stress-ng", "--zlib", "1", NULL} }
+};
+
+#define NUM_STRESSORS (sizeof(stress_battery) / sizeof(StressorConfig))
+#define SAMPLES_PER_STRESSOR 5
+
+void pin_to_core(int core_id) {
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(core_id, &cpuset);
+    if (sched_setaffinity(0, sizeof(cpu_set_t), &cpuset) != 0) {
+        perror("FATAL: sched_setaffinity failed. Are you running as root?");
+        exit(1);
+    }
+}
+
+void cleanup_handler(int sig) {
+    fprintf(stderr, "\n[CLEANUP] Received signal %d, killing child processes...\n", sig);
+    system("pkill -9 stress-ng");  // Kill all stress-ng processes
+    exit(1);
+}
 
 
 void calculate_avg_monitor_and_bprobe_time(l3pp_t l3, void** e_sets) {
@@ -166,73 +224,202 @@ void dump_Clusters_to_file(Clusters_t *Clusters, int NoC, const char *filename) 
 
 
 int main(int argc, char **argv) {
+    // Register cleanup handler for Ctrl+C and termination
+    signal(SIGINT, cleanup_handler);   // Ctrl+C
+    signal(SIGTERM, cleanup_handler);  // Kill signal
+    
+    // l3pp_t l3 = NULL;
+    // l3pp_t l3B = NULL;
+
+    // create2_newBackedMappings_and_syncSetIndexes(&l3, &l3B, HUGEPAGE_PATH_A, HUGEPAGE_PATH_B, MAPPING_FILE_A, MAPPING_FILE_B);
+
+
     l3pp_t l3 = NULL;
     void **e_sets = NULL;
-    
+
     // Default values
     int NoC = MAX_NUM_CLUSTERS;
     double tst_sec = TST_SEC;
     double sst_sec = SST_SEC;
     char *output_path = DEFAULT_SAMPLING_PATH;
 
-    // Parse command-line arguments
-    if (argc >= 4) {
-        NoC = atoi(argv[1]);
-        tst_sec = atof(argv[2]);
-        sst_sec = atof(argv[3]);
+    int start_iteration = 0;
+    int batch_size = SAMPLES_PER_STRESSOR;
+    char *output_dir = "data";
 
-        // Optional 4th argument for output path
-        if (argc >= 5) {
-            output_path = argv[4];
+    if (argc >= 3) {
+        // Argument format: ./MastikElite <start_iteration> <batch_size> [output_dir]
+        start_iteration = atoi(argv[1]);
+        batch_size = atoi(argv[2]);
+        
+        if (argc >= 4) {
+            output_dir = argv[3];
         }
-        printf("[INFO] Using command-line arguments: NoC=%d, TST_SEC=%.6d, SST_SEC=%.9f, output_path=%s\n", 
-               NoC, TST_SEC, SST_SEC, output_path);
-    
+        
+        printf("[INFO] Batch Mode Enabled:\n");
+        printf("  Start Iteration: %d\n", start_iteration);
+        printf("  Batch Size: %d\n", batch_size);
+        printf("  Output Directory: %s\n", output_dir);
+        
     } else if (argc > 1) {
-        fprintf(stderr, "Usage: %s [NoC TST_SEC SST_SEC [output_path]]\n", argv[0]);
-        fprintf(stderr, "Example: %s 64 32 0.0005 output.csv\n", argv[0]);
-        fprintf(stderr, "Using defaults: NoC=%d, TST_SEC=%.6d, SST_SEC=%.9f, output_path=%s\n", 
-                NoC, TST_SEC, SST_SEC, DEFAULT_SAMPLING_PATH);
+        fprintf(stderr, "\n❌ USAGE ERROR:\n");
+        fprintf(stderr, "Usage: %s <start_iteration> <batch_size> [output_dir]\n\n", argv[0]);
+        fprintf(stderr, "Arguments:\n");
+        fprintf(stderr, "  start_iteration : Starting index for this batch (0-based)\n");
+        fprintf(stderr, "  batch_size      : Number of iterations to run in this batch\n");
+        fprintf(stderr, "  output_dir      : (Optional) Output directory (default: 'data')\n\n");
+        fprintf(stderr, "Examples:\n");
+        fprintf(stderr, "  %s 0 5              # Run iterations 0-4 (first batch of 5)\n", argv[0]);
+        fprintf(stderr, "  %s 5 5              # Run iterations 5-9 (second batch of 5)\n", argv[0]);
+        fprintf(stderr, "  %s 0 5 /tmp/output  # Run iterations 0-4, save to /tmp/output\n\n", argv[0]);
+        fprintf(stderr, "Running with defaults: start_iteration=%d, batch_size=%d\n\n", 
+                start_iteration, batch_size);
     }
+
+ 
+    
+
+
+
+    // Parse command-line arguments
+    // if (argc >= 4) {
+    //     NoC = atoi(argv[1]);
+    //     tst_sec = atof(argv[2]);
+    //     sst_sec = atof(argv[3]);
+
+    //     // Optional 4th argument for output path
+    //     if (argc >= 5) {
+    //         output_path = argv[4];
+    //     }
+    //     printf("[INFO] Using command-line arguments: NoC=%d, TST_SEC=%.6d, SST_SEC=%.9f, output_path=%s\n", 
+    //            NoC, TST_SEC, SST_SEC, output_path);
+    
+    // } else if (argc > 1) {
+    //     fprintf(stderr, "Usage: %s [NoC TST_SEC SST_SEC [output_path]]\n", argv[0]);
+    //     fprintf(stderr, "Example: %s 64 32 0.0005 output.csv\n", argv[0]);
+    //     fprintf(stderr, "Using defaults: NoC=%d, TST_SEC=%.6d, SST_SEC=%.9f, output_path=%s\n", 
+    //             NoC, TST_SEC, SST_SEC, DEFAULT_SAMPLING_PATH);
+    // }
 
     load_mapping_and_eSetsFrom_BIN_file(&l3, &e_sets, HUGEPAGE_PATH_A, MAPPING_FILE_A);
-
-    Clusters_t *Clusters = eviction_sets_to_Clusters(&e_sets, l3_getSets(l3), MAX_NUM_CLUSTERS);
-    if (!Clusters) {
-    fprintf(stderr, "Failed to create clusters\n");
-    return 1;
-    }
-
     printf("\n=== Testing get_spatioTemporal_memoryGram ===\n");
-    
     // Calculate matrix dimensions
     uint64_t TST_cycles = CLOCK_SPEED * tst_sec;  
-    uint64_t SST_cycles = CLOCK_SPEED * sst_sec;
-    uint64_t total_samples = TST_cycles / (NoC * SST_cycles);
-    
-    printf("Total samples per cluster: %lu\n", total_samples);
-    printf("Matrix size: %lu x %d\n", total_samples, NoC);
-    
-    // Pre-allocate and initialize matrix to 0
-    uint32_t *matrix = (uint32_t *)calloc(total_samples * NoC, sizeof(uint32_t));
-    if (!matrix) {
-        fprintf(stderr, "FATAL: Matrix allocation failed.\n");
-        free_Clusters(Clusters);
-        l3_release(l3);
+    // uint64_t SST_cycles = CLOCK_SPEED * sst_sec;
+
+    // 1. PIN THE PROBER (PARENT)
+    // Assuming Core 0 is isolated or at least stable
+    printf("[INFO] Pinning Mastik prober to Core 0...\n");
+    pin_to_core(0);    
+
+    // Outer loop: iterate through different target directories and NoC values
+    struct {
+        const char *target_dir;
+        int noc;
+    } configs[] = {
+        {"256C_15TST_DynamicSST", 256}
+        // {"64C_15TST_DynamicSST", 64},
+        // {"1C_15TST_DynamicSST", 1}
+    };
+    int num_configs = sizeof(configs) / sizeof(configs[0]);
+
+
+    for (int config_idx = 0; config_idx < num_configs; config_idx++) {
+        const char *current_target_dir = configs[config_idx].target_dir;
+        NoC = configs[config_idx].noc;
+
+        Clusters_t *Clusters = eviction_sets_to_Clusters(&e_sets, l3_getSets(l3), NoC);
+        if (!Clusters) {
+        fprintf(stderr, "Failed to create clusters\n");
         return 1;
-    }
-    
-    printf("Matrix allocated and initialized to 0\n");
-    
-    // Call the function
-    get_spatioTemporal_memoryGram(Clusters, NoC, TST_cycles, SST_cycles, matrix, output_path);
-    
-    printf("✓ Successfully completed get_spatioTemporal_memoryGram test\n");
-    printf("Output written to memoryGram_output.csv\n");
+        }
+        
+        printf("\n[INFO] Processing config: %s with NoC=%d\n", current_target_dir, NoC);
+
+        int setsPerCluster = l3_getSets(l3)/NoC;
+        uint64_t SST_cycles = 200*1.5*setsPerCluster*l3_getAssociativity(l3);
+        printf("Sets PER CLUSTER %d, NoC %d, SST_Cycles: %lu\n", setsPerCluster, NoC, SST_cycles);
+
+        uint64_t total_samples = TST_cycles / (NoC * SST_cycles);
+
+        printf("Total samples per cluster: %lu\n", total_samples);
+        printf("Matrix size: %lu x %d\n", total_samples, NoC);
+        
+        // Pre-allocate and initialize matrix to 0
+        uint32_t *matrix = (uint32_t *)calloc(total_samples * NoC, sizeof(uint32_t));
+        if (!matrix) {
+            fprintf(stderr, "FATAL: Matrix allocation failed.\n");
+            free_Clusters(Clusters);
+            l3_release(l3);
+            return 1;
+        }
+        printf("Matrix allocated and initialized to 0\n");
     
 
-    free(matrix);
-    free_Clusters(Clusters);
+        for (int s_idx = 0; s_idx < NUM_STRESSORS; s_idx++) {
+            printf("\n==================================================\n");
+            printf("[*] Starting Battery: %s\n", stress_battery[s_idx].stressor_name);
+            printf("==================================================\n");
+
+            for (int iteration = start_iteration; iteration < start_iteration + batch_size; iteration++) {
+                
+                // 1. DYNAMIC FILE NAMING
+                char dynamic_output_path[256];
+                snprintf(dynamic_output_path, sizeof(dynamic_output_path), "data/%s/%s/%d.csv", 
+                        current_target_dir, stress_battery[s_idx].stressor_name, iteration);
+
+                // Ensure output directory exists
+                char mkdir_cmd[512];
+                snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p $(dirname %s)", dynamic_output_path);
+                system(mkdir_cmd);
+
+                printf("  -> [Iter %d/%d] Collecting %s...\n", 
+                    iteration - start_iteration + 1, batch_size, dynamic_output_path);
+
+                // 2. FORK THE NOISE INJECTOR
+                pid_t pid = fork();
+                if (pid < 0) {
+                    perror("FATAL: Fork failed");
+                    exit(1);
+                }
+
+                if (pid == 0) {
+                    // CHILD PROCESS: Pin to Core 1 and execute stressor
+                    pin_to_core(1); 
+                    execvp(stress_battery[s_idx].exec_args[0], stress_battery[s_idx].exec_args);
+                    perror("FATAL: execvp failed in child"); 
+                    exit(1);
+                }
+
+                // 3. WAIT FOR STEADY STATE
+                // Let the OS handle page faults and let the stressor hit its loop
+                usleep(50000); // 500ms
+
+                // 4. MEASURE (The Probe)
+                // Note: We pass the dynamically generated filename here
+                get_spatioTemporal_memoryGram(Clusters, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path);
+
+                // 5. TERMINATE NOISE
+                kill(pid, SIGKILL);
+                waitpid(pid, NULL, 0); // Reap zombie
+
+                // 6. THE COOLDOWN PHASE (CRITICAL)
+                // You MUST let the CPU return to an idle baseline before the next loop,
+                // otherwise the L3 cache will bleed noise into the next iteration.
+                usleep(1000000); // 1 FULL SECOND COOLDOWN
+
+                // Zero out the matrix memory for the next iteration to prevent logical bleeding
+                memset(matrix, 0, total_samples * NoC * sizeof(uint32_t));
+            }
+        }
+        // FREE resources at the end of this config's iteration
+        free(matrix);
+        free_Clusters(Clusters);
+        printf("[INFO] Data collection complete for config %d. Matrix and Clusters freed.\n", config_idx);
+    }
+    
+
+
     l3_release(l3);
 
 

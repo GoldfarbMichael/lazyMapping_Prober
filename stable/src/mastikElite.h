@@ -3,9 +3,9 @@
 
 #include "mastik/l3.h"
 
-#define MAX_NUM_CLUSTERS 128
-#define TST_SEC 32
-#define SST_SEC 500e-6
+#define MAX_NUM_CLUSTERS 64
+#define TST_SEC 15
+#define SST_SEC 8000e-6
 #define DEFAULT_SAMPLING_PATH "memoryGram_output.csv"
 
 typedef struct {
