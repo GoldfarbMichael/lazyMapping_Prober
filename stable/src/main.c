@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <limits.h>
 #include <mastik/l3.h>
 #include <mastik/util.h>
 #include <mastik/impl.h>
@@ -317,10 +318,18 @@ int main(int argc, char **argv) {
         const char *target_dir;
         int noc;
     } configs[] = {
-        {"256C_15TST_DynamicSST", 256}
-        // {"64C_15TST_DynamicSST", 64},
+        
+        // {"2048C_15TST_DynamicSST", 2048}
+        // {"1024C_15TST_DynamicSST", 1024}
+        // {"512C_15TST_DynamicSST", 512}
+        // {"256C_15TST_DynamicSST", 256}
+        // {"64C_15TST_DynamicSST", 64}
+        // {"32C_15TST_DynamicSST", 32}
+        {"16C_15TST_DynamicSST", 16}
+
         // {"1C_15TST_DynamicSST", 1}
     };
+
     int num_configs = sizeof(configs) / sizeof(configs[0]);
 
 
@@ -420,7 +429,7 @@ int main(int argc, char **argv) {
     
 
 
-    l3_release(l3);
+    // l3_release(l3);
 
 
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-
+trap 'pkill -9 stress-ng; pkill -9 MastikElite' EXIT
 #set -e  # Exit on error
 
 # ============================================
