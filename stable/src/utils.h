@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include "mastik/l3.h"
 
-#define CLOCK_SPEED 3.1e9 // 3.1 GHz
+#define CLOCK_SPEED 3.6e9 // 3.6 GHz
 
 // void prepareL3(l3pp_t *l3, l3info_t info);
 static inline void maccessMy(void *p) {
