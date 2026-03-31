@@ -10,7 +10,7 @@ MASTIK_DIR = ./Mastik-main
 # -O0                  : Retained for wrapper debugging (Warning: Increases L1 cache noise).
 # -std=gnu99           : Required for inline functions, stdint.h, and inline assembly extensions.
 # -fno-strict-aliasing : Required because Murmur3 uses block pointer casting that violates strict aliasing.
-CFLAGS = -g -O0 -Wall -Wextra -std=gnu99 -fno-strict-aliasing -I$(MASTIK_DIR)/src -I$(MASTIK_DIR)
+CFLAGS = -g -O0 -Wall -Wno-implicit-fallthrough -Wextra -std=gnu99 -fno-strict-aliasing -I$(MASTIK_DIR)/src -I$(MASTIK_DIR)
 
 # LDFLAGS:
 # -L$(MASTIK_DIR)/src : Tells the linker to look in your local folder for libmastik.a

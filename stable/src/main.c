@@ -12,6 +12,7 @@
 #include <mastik/impl.h>
 #include <sys/mman.h>
 #include <signal.h>
+#include <fcntl.h>
 
 #include "utils.h"
 #include "tests.h"
@@ -25,8 +26,6 @@
 
 
 #define PROBE_ITERATIONS 30
-
-
 
 
 
@@ -171,6 +170,9 @@ void dump_Clusters_to_file(Clusters_t *Clusters, int NoC, const char *filename) 
 
 
 int main(int argc, char **argv) {
+
+
+
     // Register cleanup handler for Ctrl+C and termination
     signal(SIGINT, cleanup_handler);   // Ctrl+C
     signal(SIGTERM, cleanup_handler);  // Kill signal
@@ -189,14 +191,39 @@ int main(int argc, char **argv) {
     int start_iteration = 0;
     int batch_size = SAMPLES_PER_STRESSOR;
     char *output_dir = "data";
+    int timer_mode = 0;  // Default: 0 = native (rdtscp64), 1 = chrome
 
-    if (argc >= 3) {
-        // Argument format: ./MastikElite <start_iteration> <batch_size> [output_dir]
-        start_iteration = atoi(argv[1]);
-        batch_size = atoi(argv[2]);
+    // Parse command-line flags for timer mode
+    int first_positional_arg = 1;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-c") == 0) {
+            timer_mode = 1;  // Chrome mock timer
+            printf("[INFO] Timer Mode: Chrome Mock (-c)\n");
+        } else if (strcmp(argv[i], "-n") == 0) {
+            timer_mode = 0;  // Native rdtscp64
+            printf("[INFO] Timer Mode: Native rdtscp64 (-n)\n");
+        } else if (argv[i][0] != '-') {
+            // First non-flag argument starts positional args
+            first_positional_arg = i;
+            break;
+        }
+    }
+
+    // Count positional arguments (non-flag arguments from first_positional_arg onwards)
+    int positional_count = 0;
+    for (int i = first_positional_arg; i < argc; i++) {
+        if (argv[i][0] != '-') {
+            positional_count++;
+        }
+    }
+
+    if (positional_count >= 2) {
+        // Argument format: <start_iteration> <batch_size> [output_dir] [-c|-n]
+        start_iteration = atoi(argv[first_positional_arg]);
+        batch_size = atoi(argv[first_positional_arg + 1]);
         
-        if (argc >= 4) {
-            output_dir = argv[3];
+        if (positional_count >= 3) {
+            output_dir = argv[first_positional_arg + 2];
         }
         
         printf("[INFO] Batch Mode Enabled:\n");
@@ -206,26 +233,74 @@ int main(int argc, char **argv) {
         
     } else if (argc > 1) {
         fprintf(stderr, "\n❌ USAGE ERROR:\n");
-        fprintf(stderr, "Usage: %s <start_iteration> <batch_size> [output_dir]\n\n", argv[0]);
+        fprintf(stderr, "Usage: %s [OPTS] <start_iteration> <batch_size> [output_dir]\n\n", argv[0]);
+        fprintf(stderr, "Options:\n");
+        fprintf(stderr, "  -c              : Use Chrome mock timer (jittered, 100us clamped)\n");
+        fprintf(stderr, "  -n              : Use native rdtscp64 timer (default)\n\n");
         fprintf(stderr, "Arguments:\n");
         fprintf(stderr, "  start_iteration : Starting index for this batch (0-based)\n");
         fprintf(stderr, "  batch_size      : Number of iterations to run in this batch\n");
         fprintf(stderr, "  output_dir      : (Optional) Output directory (default: 'data')\n\n");
         fprintf(stderr, "Examples:\n");
-        fprintf(stderr, "  %s 0 5              # Run iterations 0-4 (first batch of 5)\n", argv[0]);
-        fprintf(stderr, "  %s 5 5              # Run iterations 5-9 (second batch of 5)\n", argv[0]);
-        fprintf(stderr, "  %s 0 5 /tmp/output  # Run iterations 0-4, save to /tmp/output\n\n", argv[0]);
-        fprintf(stderr, "Running with defaults: start_iteration=%d, batch_size=%d\n\n", 
-                start_iteration, batch_size);
+        fprintf(stderr, "  %s 0 5              # Run iterations 0-4 with native timer\n", argv[0]);
+        fprintf(stderr, "  %s -c 0 5           # Run iterations 0-4 with chrome timer\n", argv[0]);
+        fprintf(stderr, "  %s -n 5 5           # Run iterations 5-9 with native timer\n", argv[0]);
+        fprintf(stderr, "  %s -c 0 5 /tmp/out  # Run with chrome timer, custom output dir\n\n", argv[0]);
+        fprintf(stderr, "Running with defaults: timer_mode=%s, start_iteration=%d, batch_size=%d\n\n", 
+                timer_mode == 1 ? "chrome (-c)" : "native (-n)", start_iteration, batch_size);
     }
 
-    runStressNG_batches_nativeTimer(tst_sec, batch_size, start_iteration, output_dir, HUGEPAGE_PATH_A, MAPPING_FILE_A);
+    // Initialize browser environment globals (MUST be called FIRST before any timer usage)
+    setup_browser_environment();
+    sleep(0.5);
+    runStressNG_batches(tst_sec, batch_size, start_iteration, output_dir, HUGEPAGE_PATH_A, MAPPING_FILE_A, timer_mode);
 
 
 
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
 // ============================================ START: Regular 2 Mastik Prepares (l3, l3B) ============================================
     //  printf("=== Testing simple prepareL3 call ===\n");
     // l3pp_t l3=NULL;

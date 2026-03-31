@@ -104,15 +104,6 @@ uint64_t chrome_mock_timer(uint64_t tsc_freq_hz, uint32_t context_seed, uint32_t
     MurmurHash3_x86_32(&tuple, sizeof(tuple), secret_seed, &hash_out);
 
     // // 6. Calculate a uniform midpoint between the current clamp and the next clamp
-    // uint64_t jittered_cycles = clamped_cycles + (hash_out % cycles_per_100us);
-    // uint64_t midpoint = clamped_cycles + (cycles_per_100us/2);
-    // // 7. Temporal Discrimination (Triangle Distribution logic)
-    // uint64_t result_cycles;
-    // if (jittered_cycles < midpoint) {
-    //     result_cycles = clamped_cycles;
-    // } else {
-    //     result_cycles = clamped_cycles + cycles_per_100us;
-    // }
 
     uint64_t midpoint = clamped_cycles + (hash_out % cycles_per_100us);
     uint64_t result_cycles;

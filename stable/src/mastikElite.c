@@ -22,38 +22,65 @@
 
 // Define your massive test battery here. 
 // Note: The array MUST be NULL-terminated for execvp.
+// StressorConfig stress_battery[] = {
+//     // The Scientifically Validated L3 Thrasher
+//     { .stressor_name = "cache", .exec_args = {"stress-ng", "--cache", "1", "--cache-flush", "--cache-level", "3", NULL} },
+    
+//     // Algorithmic & Memory Access Stressors
+//     { .stressor_name = "bsearch",   .exec_args = {"stress-ng", "--bsearch", "1", "--maximize", NULL} },
+//     { .stressor_name = "heapsort",  .exec_args = {"stress-ng", "--heapsort", "1", "--maximize", NULL} },
+//     { .stressor_name = "hsearch",   .exec_args = {"stress-ng", "--hsearch", "1", "--maximize", NULL} },
+//     // { .stressor_name = "icache",    .exec_args = {"stress-ng", "--icache", "1", NULL} },
+//     { .stressor_name = "judy",      .exec_args = {"stress-ng", "--judy", "1", "--maximize", NULL} },
+//     { .stressor_name = "lockbus",   .exec_args = {"stress-ng", "--lockbus", "1", NULL} },
+//     { .stressor_name = "lsearch",   .exec_args = {"stress-ng", "--lsearch", "1", "--maximize", NULL} },
+//     { .stressor_name = "malloc",    .exec_args = {"stress-ng", "--malloc", "1", "--malloc-max", "10000", "--malloc-bytes", "4096", NULL} },
+//     { .stressor_name = "matrix",    .exec_args = {"stress-ng", "--matrix", "1", "--maximize", NULL} },
+//     // { .stressor_name = "matrix-3d", .exec_args = {"stress-ng", "--matrix-3d", "1", "--matrix-3d-size", "1024", NULL} },
+//     { .stressor_name = "membarrier",.exec_args = {"stress-ng", "--membarrier", "1", NULL}},
+//     { .stressor_name = "memcpy",    .exec_args = {"stress-ng", "--memcpy", "1", NULL} },
+//     { .stressor_name = "mergesort", .exec_args = {"stress-ng", "--mergesort", "1", "--maximize", NULL} },
+//     { .stressor_name = "qsort",     .exec_args = {"stress-ng", "--qsort", "1", "--maximize", NULL} },
+//     { .stressor_name = "radixsort", .exec_args = {"stress-ng", "--radixsort", "1", "--maximize", NULL} },
+//     { .stressor_name = "shellsort", .exec_args = {"stress-ng", "--shellsort", "1", "--maximize", NULL} },
+//     { .stressor_name = "skiplist",  .exec_args = {"stress-ng", "--skiplist", "1", "--maximize", NULL} },
+//     { .stressor_name = "str",       .exec_args = {"stress-ng", "--str", "1", NULL} },
+//     { .stressor_name = "stream",    .exec_args = {"stress-ng", "--stream", "1", "--stream-index", "3", NULL} },
+//     { .stressor_name = "tree",      .exec_args = {"stress-ng", "--tree", "1", "--maximize", NULL} },
+//     { .stressor_name = "tsearch",   .exec_args = {"stress-ng", "--tsearch", "1", "--maximize", NULL} },
+//     { .stressor_name = "vecmath",   .exec_args = {"stress-ng", "--vecmath", "1", NULL} },
+//     { .stressor_name = "wcs",       .exec_args = {"stress-ng", "--wcs", "1", NULL} },
+//     { .stressor_name = "zlib",      .exec_args = {"stress-ng", "--zlib", "1", NULL} }
+// };
+
 StressorConfig stress_battery[] = {
     // The Scientifically Validated L3 Thrasher
-    { .stressor_name = "cache", .exec_args = {"stress-ng", "--cache", "1", "--cache-flush", "--cache-level", "3", NULL} },
+    { .stressor_name = "cache", .exec_args = {"stress-ng", "--cache", "1", "--cache-flush", "--cache-level", "3", "--timeout", "20", NULL} },
     
     // Algorithmic & Memory Access Stressors
-    { .stressor_name = "bsearch",   .exec_args = {"stress-ng", "--bsearch", "1", "--maximize", NULL} },
-    // { .stressor_name = "heapsort",  .exec_args = {"stress-ng", "--heapsort", "1", "--maximize", NULL} },
-    // { .stressor_name = "hsearch",   .exec_args = {"stress-ng", "--hsearch", "1", "--maximize", NULL} },
-    // // { .stressor_name = "icache",    .exec_args = {"stress-ng", "--icache", "1", NULL} },
-    // { .stressor_name = "judy",      .exec_args = {"stress-ng", "--judy", "1", "--maximize", NULL} },
-    // { .stressor_name = "lockbus",   .exec_args = {"stress-ng", "--lockbus", "1", NULL} },
-    // { .stressor_name = "lsearch",   .exec_args = {"stress-ng", "--lsearch", "1", "--maximize", NULL} },
-    // { .stressor_name = "malloc",    .exec_args = {"stress-ng", "--malloc", "1", "--malloc-max", "10000", "--malloc-bytes", "4096", NULL} },
-    // { .stressor_name = "matrix",    .exec_args = {"stress-ng", "--matrix", "1", "--maximize", NULL} },
-    // // { .stressor_name = "matrix-3d", .exec_args = {"stress-ng", "--matrix-3d", "1", "--matrix-3d-size", "1024", NULL} },
-    // { .stressor_name = "membarrier",.exec_args = {"stress-ng", "--membarrier", "1", NULL}},
-    // { .stressor_name = "memcpy",    .exec_args = {"stress-ng", "--memcpy", "1", NULL} },
-    // { .stressor_name = "mergesort", .exec_args = {"stress-ng", "--mergesort", "1", "--maximize", NULL} },
-    // { .stressor_name = "qsort",     .exec_args = {"stress-ng", "--qsort", "1", "--maximize", NULL} },
-    // { .stressor_name = "radixsort", .exec_args = {"stress-ng", "--radixsort", "1", "--maximize", NULL} },
-    // { .stressor_name = "shellsort", .exec_args = {"stress-ng", "--shellsort", "1", "--maximize", NULL} },
-    // { .stressor_name = "skiplist",  .exec_args = {"stress-ng", "--skiplist", "1", "--maximize", NULL} },
-    // { .stressor_name = "str",       .exec_args = {"stress-ng", "--str", "1", NULL} },
-    // { .stressor_name = "stream",    .exec_args = {"stress-ng", "--stream", "1", "--stream-index", "3", NULL} },
-    // { .stressor_name = "tree",      .exec_args = {"stress-ng", "--tree", "1", "--maximize", NULL} },
-    // { .stressor_name = "tsearch",   .exec_args = {"stress-ng", "--tsearch", "1", "--maximize", NULL} },
-    // { .stressor_name = "vecmath",   .exec_args = {"stress-ng", "--vecmath", "1", NULL} },
-    // { .stressor_name = "wcs",       .exec_args = {"stress-ng", "--wcs", "1", NULL} },
-    // { .stressor_name = "zlib",      .exec_args = {"stress-ng", "--zlib", "1", NULL} }
+    { .stressor_name = "bsearch",   .exec_args = {"stress-ng", "--bsearch", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "heapsort",  .exec_args = {"stress-ng", "--heapsort", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "hsearch",   .exec_args = {"stress-ng", "--hsearch", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "judy",      .exec_args = {"stress-ng", "--judy", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "lockbus",   .exec_args = {"stress-ng", "--lockbus", "1", "--timeout", "20", NULL} },
+    { .stressor_name = "lsearch",   .exec_args = {"stress-ng", "--lsearch", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "malloc",    .exec_args = {"stress-ng", "--malloc", "1", "--malloc-max", "10000", "--malloc-bytes", "4096", "--timeout", "20", NULL} },
+    { .stressor_name = "matrix",    .exec_args = {"stress-ng", "--matrix", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "membarrier",.exec_args = {"stress-ng", "--membarrier", "1", "--timeout", "20", NULL}},
+    { .stressor_name = "memcpy",    .exec_args = {"stress-ng", "--memcpy", "1", "--timeout", "20", NULL} },
+    { .stressor_name = "mergesort", .exec_args = {"stress-ng", "--mergesort", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "qsort",     .exec_args = {"stress-ng", "--qsort", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "radixsort", .exec_args = {"stress-ng", "--radixsort", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "shellsort", .exec_args = {"stress-ng", "--shellsort", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "skiplist",  .exec_args = {"stress-ng", "--skiplist", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "str",       .exec_args = {"stress-ng", "--str", "1", "--timeout", "20", NULL} },
+    { .stressor_name = "stream",    .exec_args = {"stress-ng", "--stream", "1", "--stream-index", "3", "--timeout", "20", NULL} },
+    { .stressor_name = "tree",      .exec_args = {"stress-ng", "--tree", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "tsearch",   .exec_args = {"stress-ng", "--tsearch", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "vecmath",   .exec_args = {"stress-ng", "--vecmath", "1", "--timeout", "20", NULL} },
+    { .stressor_name = "wcs",       .exec_args = {"stress-ng", "--wcs", "1", "--timeout", "20", NULL} },
+    { .stressor_name = "zlib",      .exec_args = {"stress-ng", "--zlib", "1", "--timeout", "20", NULL} }
 };
-
-
 
 void pin_to_core(int core_id) {
     cpu_set_t cpuset;
@@ -427,7 +454,83 @@ void get_spatioTemporal_memoryGram(Clusters_t *Clusters, int NoC, uint64_t TST_c
 
 
 
-int runStressNG_batches_nativeTimer(double tst_sec, int batch_size, int start_iteration, char *output_dir,const char *backing_file, const char *BIN_file) {
+
+void get_spatioTemporal_memoryGram_ChromeMock(Clusters_t *Clusters, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename){
+    if (!Clusters) {
+        fprintf(stderr, "FATAL: Clusters is NULL.\n");
+        return;
+    }
+
+    if (!matrix) {
+        fprintf(stderr, "FATAL: matrix is NULL. Must be pre-allocated and initialized to 0.\n");
+        return;
+    }
+
+    // 1. Calculate matrix dimensions
+    uint64_t total_samples_per_cluster = TST_cycles / (NoC * SST_cycles);
+    uint64_t SST_us = (SST_cycles *1000000)/g_tsc_freq_hz;  // Convert SST_cycles to microseconds for mock timer
+    
+    // 2. Spatio-Temporal Sampling Phase (Strictly NO I/O here)
+    for (uint64_t s = 0; s < total_samples_per_cluster; s++) {
+        for (int c = 0; c < NoC; c++) {
+            
+            // Check if cluster has addresses
+            if (Clusters->clusterHeads[c] == NULL) {
+                continue;
+            }
+            
+            // Get the head of the circular linked list for this cluster
+            void *head = Clusters->clusterHeads[c];
+            register void *curr = head;
+            register uint32_t count = 0;
+            
+            // Set the timer constraint for this cluster
+            uint64_t start_cluster = chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed);
+            uint64_t end_cluster = start_cluster + SST_us;
+            
+            // Polling Loop - traverse cluster's circular linked list using LNEXT
+            while (chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed) < end_cluster) {
+                // Access the cache line at curr
+                maccessMy(curr);
+                curr = LNEXT(curr);
+                count++;
+            }
+            
+            // Store the access count
+            matrix[s * NoC + c] = count;
+        }
+    }
+
+    // 3. I/O Phase (Post-Measurement)
+    FILE *fp = fopen(filename, "w");
+    if (!fp) {
+        fprintf(stderr, "FATAL: Could not open output file %s\n", filename);
+        free_Clusters(Clusters);
+        return;
+    }
+
+    // Write CSV Header
+    for (int g = 0; g < NoC; g++) {
+        fprintf(fp, "G%d%s", g, (g == NoC - 1) ? "" : ",");
+    }
+    fprintf(fp, "\n");
+
+    // Write Matrix Data
+    for (uint64_t t = 0; t < total_samples_per_cluster; t++) {
+        for (int g = 0; g < NoC; g++) {
+            fprintf(fp, "%u%s", matrix[t * NoC + g], (g == NoC - 1) ? "" : ",");
+        }
+        fprintf(fp, "\n");
+    }
+
+    fclose(fp);
+    printf("Successfully wrote %lu samples for %d clusters to %s\n", total_samples_per_cluster, NoC, filename);
+}
+
+
+
+
+int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, char *output_dir, const char *backing_file, const char *BIN_file, int timer_mode) {
     l3pp_t l3 = NULL;
     void **e_sets = NULL;
 
@@ -437,8 +540,20 @@ int runStressNG_batches_nativeTimer(double tst_sec, int batch_size, int start_it
     int NoC = parse_NoC_from_dirname(output_dir);
     int setsPerCluster = l3_getSets(l3)/NoC;
 
-    uint64_t TST_cycles = CLOCK_SPEED * tst_sec;  
+    uint64_t TST_cycles = g_tsc_freq_hz * tst_sec;  
+    //print TST_Cycles and g_tsc_freq_hz
+    printf("TST_cycles: %lu, g_tsc_freq_hz: %lu\n", TST_cycles, g_tsc_freq_hz);
     uint64_t SST_cycles = 200*1.5*setsPerCluster*l3_getAssociativity(l3);
+    
+    // For chrome mock timer (mode 1), enforce minimum 500us window by adjusting SST_cycles
+    if (timer_mode == 1) {
+        uint64_t min_SST_cycles_for_500us = (500 * g_tsc_freq_hz) / 1000000;
+        if (SST_cycles < min_SST_cycles_for_500us) {
+            printf("[TIMER_MODE=1] SST_cycles adjusted: %lu -> %lu (minimum 500us window)\n", SST_cycles, min_SST_cycles_for_500us);
+            SST_cycles = min_SST_cycles_for_500us;
+        }
+    }
+    
     uint64_t totalSweeps_forCluster = TST_cycles / (NoC * SST_cycles);
     printf("Sets PER CLUSTER %d, NoC %d, SST_Cycles: %lu\n", setsPerCluster, NoC, SST_cycles);
     printf("Total samples per cluster: %lu\n", totalSweeps_forCluster);
@@ -475,7 +590,8 @@ int runStressNG_batches_nativeTimer(double tst_sec, int batch_size, int start_it
             
             // 1. DYNAMIC FILE NAMING
             char dynamic_output_path[256];
-            snprintf(dynamic_output_path, sizeof(dynamic_output_path), "data/%s/%s/%d.csv", 
+            snprintf(dynamic_output_path, sizeof(dynamic_output_path), "data/%s/%s/%s/%d.csv", 
+                    (timer_mode == 1) ? "chrome_clock" : "native_clock",
                     output_dir, stress_battery[s_idx].stressor_name, iteration);
 
             // Ensure output directory exists
@@ -507,7 +623,20 @@ int runStressNG_batches_nativeTimer(double tst_sec, int batch_size, int start_it
 
             // 4. MEASURE (The Probe)
             // Note: We pass the dynamically generated filename here
-            get_spatioTemporal_memoryGram(Clusters, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path);
+            // Choose measurement function based on timer_mode
+            switch(timer_mode) {
+                case 0:  // Use rdtscp64()
+                    get_spatioTemporal_memoryGram(Clusters, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path);
+                    break;
+                case 1:  // Use chrome_mock_timer()
+                    get_spatioTemporal_memoryGram_ChromeMock(Clusters, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path);
+                    break;
+                default:
+                    fprintf(stderr, "ERROR: Unknown timer_mode %d. Use 0 (rdtscp64) or 1 (chrome_mock_timer)\n", timer_mode);
+                    kill(pid, SIGKILL);
+                    waitpid(pid, NULL, 0);
+                    return 1;
+            }
 
             // 5. TERMINATE NOISE
             kill(pid, SIGKILL);
@@ -529,6 +658,8 @@ int runStressNG_batches_nativeTimer(double tst_sec, int batch_size, int start_it
     
     return 0;
 }
+
+
 
 
 

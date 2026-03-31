@@ -3,7 +3,7 @@
 # filepath: /home/ubu/Desktop/Michael/lazyMapping_Prober/empty_dirs.sh
 
 DIRS=(
-    "data/2048C_15TST_DynamicSST"
+    "data/chrome_clock/1024C_15TST_DynamicSST"
     # "data/1024C_15TST_DynamicSST"
     # "data/512C_15TST_DynamicSST"
     # "data/256C_15TST_DynamicSST"

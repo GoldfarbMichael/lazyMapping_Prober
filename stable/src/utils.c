@@ -9,11 +9,52 @@
 #include <sys/mman.h>
 #include <errno.h>
 #include "utils.h"
+#include "murmur3.h"
 
 #define EXPECTED_SETS 16384
 #define HUGE_PAGE_SIZE (2 * 1024 * 1024)
 // Max pages to scan. For a 24MB buffer, we need 12. 64 is safe padding.
 #define MAX_TRACKED_PAGES 64 
+
+
+
+
+// -------------------------------- Mock browser env Start --------------------------------
+// 1. Global State
+uint64_t g_tsc_freq_hz = 0;
+uint32_t g_context_seed = 0x12345678; // Simulates a specific victim website origin
+uint32_t g_secret_seed  = 0;
+
+// 2. Initialization Function (Run ONCE at startup)
+void setup_browser_environment() {
+    // A. Calibrate TSC
+    g_tsc_freq_hz = get_tsc_freq_hz();
+    if (g_tsc_freq_hz == 0) {
+        fprintf(stderr, "Fatal: TSC Calibration failed.\n");
+        // Exit or handle error
+    }
+
+    // B. Seed Initialization based on Compile-Time Flag
+#ifdef LAB_DETERMINISTIC_MODE
+    printf("[LAB MODE] Using static secret seed for distribution testing.\n");
+    g_secret_seed = 0xCAFEBABE;
+#else
+    printf("[DATASET MODE] Generating dynamic secret seed for ML collection.\n");
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0 || read(fd, &g_secret_seed, sizeof(g_secret_seed)) != sizeof(g_secret_seed)) {
+        fprintf(stderr, "Fatal: Failed to read /dev/urandom.\n");
+        // Exit or handle error
+    }
+    if (fd >= 0) close(fd);
+#endif
+}
+
+// -------------------------------- Mock browser env End --------------------------------
+
+
+
+
+
 
 typedef struct {
     uint64_t phys_base;
@@ -423,4 +464,94 @@ int check_hugepage_contiguity(const char *path, size_t buf_size) {
 
     munmap(buf, buf_size);
     return all_contiguous;
+}
+
+
+
+uint64_t get_tsc_freq_hz() {
+    uint32_t eax, ebx, ecx, edx;
+    
+    // Execute CPUID with EAX = 0x15, ECX = 0
+    __asm__ volatile("cpuid"
+                     : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                     : "a"(0x15), "c"(0));
+
+    // If EAX or EBX is 0, Leaf 0x15 is not supported by this microarchitecture
+    if (eax == 0 || ebx == 0) {
+        fprintf(stderr, "Error: CPUID Leaf 0x15 not supported on this silicon.\n");
+        return 0; 
+    }
+
+    // On some microarchitectures (e.g., Skylake), ECX returns 0.
+    // In those cases, the core crystal clock is typically 24 MHz.
+    if (ecx == 0) {
+        ecx = 24000000; 
+    }
+
+    // TSC_Frequency = (Crystal_Clock * Numerator) / Denominator
+    return ((uint64_t)ecx * ebx) / eax;
+}
+
+
+
+// Define the exact Memory Tuple expected by the browser engine
+// __attribute__((packed)) prevents the compiler from adding padding bytes, 
+// ensuring strict deterministic hashing of the memory block.
+struct __attribute__((packed)) ChromeHashTuple {
+    uint64_t clamped_time;
+    uint32_t context_seed;
+};
+
+// Updated native timer function
+uint64_t chrome_mock_timer(uint64_t tsc_freq_hz, uint32_t context_seed, uint32_t secret_seed) {
+    uint32_t aux;
+    // Get raw cycles
+    uint64_t current_cycles = __builtin_ia32_rdtscp(&aux); 
+
+    // Calculate cycles per 100 microseconds (Time = Cycles / Freq)
+    uint64_t cycles_per_100us = tsc_freq_hz / 10000;
+    if (cycles_per_100us == 0) return current_cycles; // Safety catch
+
+    // Clamp the time to the nearest lower 100us boundary
+    uint64_t clamped_cycles = current_cycles - (current_cycles % cycles_per_100us);
+
+    // Construct the Hash Tuple (clamped_time + context_seed)
+    struct ChromeHashTuple tuple;
+    tuple.clamped_time = clamped_cycles;
+    tuple.context_seed = context_seed;
+
+    // Hash the Tuple using the secret_seed
+    uint32_t hash_out;
+    // We hash the entire struct, and use secret_seed as the Murmur3 seed
+    MurmurHash3_x86_32(&tuple, sizeof(tuple), secret_seed, &hash_out);
+
+    // Calculate a uniform midpoint between the current clamp and the next clamp
+
+    uint64_t midpoint = clamped_cycles + (hash_out % cycles_per_100us);
+    uint64_t result_cycles;
+    if (current_cycles < midpoint) {
+        result_cycles = clamped_cycles;
+    } else {
+        result_cycles = clamped_cycles + cycles_per_100us;
+    }
+
+
+    // 8. Convert cycles to microseconds and return as int
+    return (uint64_t)((result_cycles * 1000000) / tsc_freq_hz);
+}
+
+uint64_t wait_edge(uint64_t tsc_freq_hz, uint32_t context_seed, uint32_t secret_seed){
+    uint64_t current = chrome_mock_timer(tsc_freq_hz, context_seed, secret_seed);
+    volatile uint64_t next=chrome_mock_timer(tsc_freq_hz, context_seed, secret_seed);
+    while(current == (next = chrome_mock_timer(tsc_freq_hz, context_seed, secret_seed))){}
+    return next;
+}
+
+uint64_t count_edge(uint64_t tsc_freq_hz, uint32_t context_seed, uint32_t secret_seed){
+    uint64_t current = chrome_mock_timer(tsc_freq_hz, context_seed, secret_seed);
+    volatile uint64_t count=0;
+    while(current == chrome_mock_timer(tsc_freq_hz, context_seed, secret_seed)){
+        count++;
+    }
+    return count;
 }

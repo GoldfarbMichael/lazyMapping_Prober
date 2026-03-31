@@ -6,10 +6,18 @@
 
 #define CLOCK_SPEED 3.6e9 // 3.6 GHz
 
-// void prepareL3(l3pp_t *l3, l3info_t info);
+// ===== Browser Environment Globals =====
+extern uint64_t g_tsc_freq_hz;
+extern uint32_t g_context_seed;
+extern uint32_t g_secret_seed;
+
+void setup_browser_environment(void);
+
+// ===== Utility Functions =====
 static inline void maccessMy(void *p) {
     __asm__ volatile("movb (%0), %%al" : : "r"(p) : "eax", "memory");
 }
+
 
 void prepareL3(l3pp_t *l3, int enablePTE);
 
@@ -41,6 +49,12 @@ void **phys_to_virt_buffer(void *buffer, size_t buf_size, uint64_t *phys_addr_bu
 // (Does not need l3pp_t)
 void **fill_eviction_sets(void *buffer, size_t buf_size, uint64_t *phys_addr_buffer, int total_sets, int ways);
 
-
 int check_hugepage_contiguity(const char *path, size_t buf_size);
+
+
+uint64_t get_tsc_freq_hz();
+//returns time in jittered 100us resolution, in us units
+uint64_t chrome_mock_timer(uint64_t tsc_freq_hz, uint32_t context_seed, uint32_t secret_seed);
+uint64_t wait_edge(uint64_t tsc_freq_hz, uint32_t context_seed, uint32_t secret_seed);
+uint64_t count_edge(uint64_t tsc_freq_hz, uint32_t context_seed, uint32_t secret_seed);
 #endif
