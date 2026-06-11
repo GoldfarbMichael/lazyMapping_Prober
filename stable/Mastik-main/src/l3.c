@@ -672,6 +672,12 @@ int* get_transTable(l3pp_t l3, l3pp_t l3B, void **e_setsA, void ** e_setsB, int 
     uint16_t *resVictim = (uint16_t*) calloc(1, sizeof(uint16_t));
     uint16_t *finalResVictim = (uint16_t*) calloc(l3_getSets(l3B), sizeof(uint16_t));
 
+    uint64_t cycleCount_miss = 0;
+    uint64_t cycleCount_hit = 0;
+
+    int missCount = 0;
+    int hitCount = 0;
+
     // for(int slice = 0; slice < l3_getSlices(l3); slice++){
     for(int group = 0; group < numOfGroups; group++){
 
@@ -693,10 +699,31 @@ int* get_transTable(l3pp_t l3, l3pp_t l3B, void **e_setsA, void ** e_setsB, int 
 
             l3_probecount(l3, resAttacker);
 
-            l3_probecount(l3B,resVictim);
-            finalResVictim[i] = resVictim[0];
 
+
+            uint32_t aux;
+            uint64_t start = __builtin_ia32_rdtscp(&aux); 
+            l3_probecount(l3B,resVictim);
+            uint64_t end = __builtin_ia32_rdtscp(&aux); 
+            finalResVictim[i] = resVictim[0];
+            if(resVictim[0] == 0){
+              cycleCount_hit = cycleCount_hit + (end-start);
+              hitCount = hitCount + 12;
+            }
+            else if(resVictim[0] > 7){
+              cycleCount_miss = cycleCount_miss + (end-start);
+              missCount = missCount + resVictim[0];
+            }
         }
+        double avg_cycles = (double)cycleCount_hit / (double)hitCount;
+        double avg_ns = avg_cycles*(1000000000.0 / (double)3.6e9);
+        printf("Average cycles per Hit: %.2f cycles\n", avg_cycles);
+        printf("Average time per Hit: %.2f ns\n", avg_ns);
+
+        avg_cycles = (double)cycleCount_miss / (double)missCount;
+        avg_ns = avg_cycles*(1000000000.0 / (double)3.6e9);
+        printf("Average cycles per Miss: %.2f cycles\n", avg_cycles);
+        printf("Average time per Miss: %.2f ns\n", avg_ns);
 
         transTable[group] = get_active_group(finalResVictim, setsPerGroup, l3_getSets(l3B), associativity);
 

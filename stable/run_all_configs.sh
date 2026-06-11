@@ -30,6 +30,7 @@ trap cleanup SIGINT SIGTERM
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BATCH_RUNNER="$SCRIPT_DIR/batch_runner.sh"
 TIMER_MODE="-c"  # Chrome timer
+# TIMER_MODE="-n"  # native timer
 COOLDOWN_SECS=60
 LOG_DIR="$SCRIPT_DIR/batch_logs"
 
@@ -92,10 +93,12 @@ format_duration() {
 # Main execution loop
 # ============================================
 CONFIGS=()
-POWERS_OF_2=(1 2 4 8 16 32 64 128 256 512)
+# POWERS_OF_2=(1 2 4 8 16 32 64 256 512 1024 2048 4096)
+POWERS_OF_2=(1 2 4 8 16 32 64 256 512 1024 2048)
+# POWERS_OF_2=(2)
 
 for cores in "${POWERS_OF_2[@]}"; do
-    CONFIGS+=("${cores}C_2TST_DynamicSST")
+    CONFIGS+=("${cores}C_2TST_90K_2288cycles")
 done
 
 TOTAL_CONFIGS=${#CONFIGS[@]}

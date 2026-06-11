@@ -9,7 +9,7 @@ PROGRAM="./MastikElite"
 TIMER_MODE="-n"  # Default: -n (native), can be -c (chrome)
 CONFIG_DIR=""    # Will be set from command-line argument
 BATCH_SIZE=1
-TOTAL_ITERATIONS=50
+TOTAL_ITERATIONS=200
 COOLDOWN_SECS=10
 OUTPUT_DIR="batch_logs"
 
@@ -128,7 +128,7 @@ echo ""
 SUCCESS_COUNT=0
 FAIL_COUNT=0
 
-for ((batch=1; batch<=NUM_BATCHES; batch++)); do
+for ((batch=50; batch<=NUM_BATCHES; batch++)); do
     START_ITER=$(( (batch - 1) * BATCH_SIZE ))
     END_ITER=$(( START_ITER + BATCH_SIZE ))
     if [ $END_ITER -gt $TOTAL_ITERATIONS ]; then

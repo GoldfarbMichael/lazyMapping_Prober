@@ -134,7 +134,7 @@ uint64_t count_edge(uint64_t tsc_freq_hz, uint32_t context_seed, uint32_t secret
     return count;
 }
 
-#define RESULT_SIZE 100000
+#define RESULT_SIZE 1000000
 
 int main() {
     printf("===== CHROME MOCK TIMER TEST SUITE =====\n\n");
@@ -145,31 +145,94 @@ int main() {
     uint64_t results[RESULT_SIZE];
     uint64_t counts[RESULT_SIZE];
 
-    for(int i=0; i<RESULT_SIZE; i++){
-        uint64_t start = wait_edge(g_tsc_freq_hz, g_context_seed, g_secret_seed);
-        counts[i]=count_edge(g_tsc_freq_hz, g_context_seed, g_secret_seed);
-    }
+    // for(int i=0; i<RESULT_SIZE; i++){
+    //     uint64_t start = wait_edge(g_tsc_freq_hz, g_context_seed, g_secret_seed);
+    //     counts[i]=count_edge(g_tsc_freq_hz, g_context_seed, g_secret_seed);
 
+    // }
     for(int i=0; i<RESULT_SIZE; i++){
         uint32_t aux;
-        uint64_t start = __builtin_ia32_rdtscp(&aux); 
-        wait_edge(g_tsc_freq_hz, g_context_seed, g_secret_seed);
-        uint64_t end = __builtin_ia32_rdtscp(&aux);
-        results[i] = ((end - start) * 1000000000) / g_tsc_freq_hz;
+        uint64_t start = __builtin_ia32_rdtscp(&aux);
+
     }
 
-    //write array into csv file
-    FILE *fp = fopen("chrome_timer_results.csv", "w");
-    if(fp == NULL){
-        fprintf(stderr, "Error opening file for writing.\n");
-        return 1;
-    }
-    fprintf(fp, "EdgeIndex,times ,Count\n");
+    uint32_t aux;
+    uint64_t start = __builtin_ia32_rdtscp(&aux); 
     for(int i=0; i<RESULT_SIZE; i++){
-        fprintf(fp, "%d,%lu,%lu\n", i, results[i],counts[i]);
+        uint64_t current = chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed);
     }
-    fclose(fp);
-    printf("Test completed. Results written to chrome_timer_results.csv\n");
+    uint64_t end = __builtin_ia32_rdtscp(&aux);
+    uint64_t totalTime_cycles = end - start;
+    double avg_cycles = (double)totalTime_cycles / (double)RESULT_SIZE;
+    double avg_ns = avg_cycles*(1000000000.0 / (double)g_tsc_freq_hz);
+    //print avg cycles and nanoseconds
+    printf("Average cycles per call(MOCK): %.2f cycles\n", avg_cycles);
+    printf("Average time per call(MOCK): %.2f ns\n", avg_ns);
+    
+
+
+
+    start = __builtin_ia32_rdtscp(&aux); 
+    for(int i=0; i<RESULT_SIZE; i++){
+        uint64_t current = __builtin_ia32_rdtscp(&aux);
+    }
+    end = __builtin_ia32_rdtscp(&aux);
+    totalTime_cycles = end - start;
+    avg_cycles = (double)totalTime_cycles / (double)RESULT_SIZE;
+    avg_ns = avg_cycles*(1000000000.0 / (double)g_tsc_freq_hz);
+    //print avg cycles and nanoseconds
+    printf("Average cycles per call: %.2f cycles\n", avg_cycles);
+    printf("Average time per call: %.2f ns\n", avg_ns);
+
+
+
+    uint8_t buf = 0;
+    uint8_t *p = &buf;
+    start = __builtin_ia32_rdtscp(&aux); 
+    for(int i=0; i<RESULT_SIZE; i++){
+        __asm__ volatile("movq (%0), %%rax" : : "r"(&results[i]) : "rax", "memory");
+
+    }
+    end = __builtin_ia32_rdtscp(&aux);
+    totalTime_cycles = end - start;
+    avg_cycles = (double)totalTime_cycles / (double)RESULT_SIZE;
+    avg_ns = avg_cycles*(1000000000.0 / (double)g_tsc_freq_hz);
+    //print avg cycles and nanoseconds
+    printf("Average cycles per access: %.2f cycles\n", avg_cycles);
+    printf("Average time per access: %.2f ns\n", avg_ns);
+
+
+
+
+    // for(int i=0; i<RESULT_SIZE; i++){
+    //     uint32_t aux;
+    //     uint64_t start = __builtin_ia32_rdtscp(&aux); 
+    //     uint64_t current = __builtin_ia32_rdtscp(&aux); 
+    //     uint64_t end = __builtin_ia32_rdtscp(&aux);
+    //     counts[i] = ((end - start) * 1000000000) / g_tsc_freq_hz;
+    // }
+
+    // for(int i=0; i<RESULT_SIZE; i++){
+    //     uint32_t aux;
+    //     uint64_t start = __builtin_ia32_rdtscp(&aux); 
+    //     // wait_edge(g_tsc_freq_hz, g_context_seed, g_secret_seed);
+    //     uint64_t current = chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed);
+    //     uint64_t end = __builtin_ia32_rdtscp(&aux);
+    //     results[i] = ((end - start) * 1000000000) / g_tsc_freq_hz;
+    // }
+
+    // //write array into csv file
+    // FILE *fp = fopen("chrome_timer_results.csv", "w");
+    // if(fp == NULL){
+    //     fprintf(stderr, "Error opening file for writing.\n");
+    //     return 1;
+    // }
+    // fprintf(fp, "EdgeIndex,times ,Count\n");
+    // for(int i=0; i<RESULT_SIZE; i++){
+    //     fprintf(fp, "%d,%lu,%lu\n", i, results[i],counts[i]);
+    // }
+    // fclose(fp);
+    // printf("Test completed. Results written to chrome_timer_results.csv\n");
 
 
 

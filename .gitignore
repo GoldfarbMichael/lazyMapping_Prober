@@ -2,6 +2,9 @@
 lazyMapping_Prober
 *.o
 
+# Claude config (symlinked, machine-local)
+CLAUDE.md
+
 # Log files
 *.jsonl
 *.log
@@ -30,3 +33,8 @@ Thumbs.db
 stable/Doxyfile
 stable/html/
 stable/latex/
+
+*pycache__
+# Python bytecode
+__pycache__/
+*.pyc

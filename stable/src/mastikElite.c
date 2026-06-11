@@ -19,68 +19,105 @@
 #include "utils.h"
 #include "mastikElite.h"
 
-
+#define ACCESSES_TILL_TIMER_POLL 90
 // Define your massive test battery here. 
 // Note: The array MUST be NULL-terminated for execvp.
-// StressorConfig stress_battery[] = {
-//     // The Scientifically Validated L3 Thrasher
-//     { .stressor_name = "cache", .exec_args = {"stress-ng", "--cache", "1", "--cache-flush", "--cache-level", "3", NULL} },
-    
-//     // Algorithmic & Memory Access Stressors
-//     { .stressor_name = "bsearch",   .exec_args = {"stress-ng", "--bsearch", "1", "--maximize", NULL} },
-//     { .stressor_name = "heapsort",  .exec_args = {"stress-ng", "--heapsort", "1", "--maximize", NULL} },
-//     { .stressor_name = "hsearch",   .exec_args = {"stress-ng", "--hsearch", "1", "--maximize", NULL} },
-//     // { .stressor_name = "icache",    .exec_args = {"stress-ng", "--icache", "1", NULL} },
-//     { .stressor_name = "judy",      .exec_args = {"stress-ng", "--judy", "1", "--maximize", NULL} },
-//     { .stressor_name = "lockbus",   .exec_args = {"stress-ng", "--lockbus", "1", NULL} },
-//     { .stressor_name = "lsearch",   .exec_args = {"stress-ng", "--lsearch", "1", "--maximize", NULL} },
-//     { .stressor_name = "malloc",    .exec_args = {"stress-ng", "--malloc", "1", "--malloc-max", "10000", "--malloc-bytes", "4096", NULL} },
-//     { .stressor_name = "matrix",    .exec_args = {"stress-ng", "--matrix", "1", "--maximize", NULL} },
-//     // { .stressor_name = "matrix-3d", .exec_args = {"stress-ng", "--matrix-3d", "1", "--matrix-3d-size", "1024", NULL} },
-//     { .stressor_name = "membarrier",.exec_args = {"stress-ng", "--membarrier", "1", NULL}},
-//     { .stressor_name = "memcpy",    .exec_args = {"stress-ng", "--memcpy", "1", NULL} },
-//     { .stressor_name = "mergesort", .exec_args = {"stress-ng", "--mergesort", "1", "--maximize", NULL} },
-//     { .stressor_name = "qsort",     .exec_args = {"stress-ng", "--qsort", "1", "--maximize", NULL} },
-//     { .stressor_name = "radixsort", .exec_args = {"stress-ng", "--radixsort", "1", "--maximize", NULL} },
-//     { .stressor_name = "shellsort", .exec_args = {"stress-ng", "--shellsort", "1", "--maximize", NULL} },
-//     { .stressor_name = "skiplist",  .exec_args = {"stress-ng", "--skiplist", "1", "--maximize", NULL} },
-//     { .stressor_name = "str",       .exec_args = {"stress-ng", "--str", "1", NULL} },
-//     { .stressor_name = "stream",    .exec_args = {"stress-ng", "--stream", "1", "--stream-index", "3", NULL} },
-//     { .stressor_name = "tree",      .exec_args = {"stress-ng", "--tree", "1", "--maximize", NULL} },
-//     { .stressor_name = "tsearch",   .exec_args = {"stress-ng", "--tsearch", "1", "--maximize", NULL} },
-//     { .stressor_name = "vecmath",   .exec_args = {"stress-ng", "--vecmath", "1", NULL} },
-//     { .stressor_name = "wcs",       .exec_args = {"stress-ng", "--wcs", "1", NULL} },
-//     { .stressor_name = "zlib",      .exec_args = {"stress-ng", "--zlib", "1", NULL} }
-// };
 
 StressorConfig stress_battery[] = {
     // The Scientifically Validated L3 Thrasher
-    { .stressor_name = "cache", .exec_args = {"stress-ng", "--cache", "1", "--cache-flush", "--cache-level", "3", "--timeout", "20", NULL} },
+    { .stressor_name = "cache", .exec_args = {"stress-ng", "--cache", "1", "--cache-flush", "--cache-level", "3","--timeout", "20", NULL} },
     
     // Algorithmic & Memory Access Stressors
-    { .stressor_name = "bsearch",   .exec_args = {"stress-ng", "--bsearch", "1", "--maximize", "--timeout", "20", NULL} },
-    { .stressor_name = "heapsort",  .exec_args = {"stress-ng", "--heapsort", "1", "--maximize", "--timeout", "20", NULL} },
-    { .stressor_name = "hsearch",   .exec_args = {"stress-ng", "--hsearch", "1", "--maximize", "--timeout", "20", NULL} },
-    { .stressor_name = "judy",      .exec_args = {"stress-ng", "--judy", "1", "--maximize", "--timeout", "20", NULL} },
-    { .stressor_name = "lockbus",   .exec_args = {"stress-ng", "--lockbus", "1", "--timeout", "20", NULL} },
-    { .stressor_name = "lsearch",   .exec_args = {"stress-ng", "--lsearch", "1", "--maximize", "--timeout", "20", NULL} },
-    { .stressor_name = "malloc",    .exec_args = {"stress-ng", "--malloc", "1", "--malloc-max", "10000", "--malloc-bytes", "4096", "--timeout", "20", NULL} },
-    { .stressor_name = "matrix",    .exec_args = {"stress-ng", "--matrix", "1", "--maximize", "--timeout", "20", NULL} },
-    { .stressor_name = "membarrier",.exec_args = {"stress-ng", "--membarrier", "1", "--timeout", "20", NULL}},
-    { .stressor_name = "memcpy",    .exec_args = {"stress-ng", "--memcpy", "1", "--timeout", "20", NULL} },
-    { .stressor_name = "mergesort", .exec_args = {"stress-ng", "--mergesort", "1", "--maximize", "--timeout", "20", NULL} },
-    { .stressor_name = "qsort",     .exec_args = {"stress-ng", "--qsort", "1", "--maximize", "--timeout", "20", NULL} },
-    { .stressor_name = "radixsort", .exec_args = {"stress-ng", "--radixsort", "1", "--maximize", "--timeout", "20", NULL} },
-    { .stressor_name = "shellsort", .exec_args = {"stress-ng", "--shellsort", "1", "--maximize", "--timeout", "20", NULL} },
-    { .stressor_name = "skiplist",  .exec_args = {"stress-ng", "--skiplist", "1", "--maximize", "--timeout", "20", NULL} },
-    { .stressor_name = "str",       .exec_args = {"stress-ng", "--str", "1", "--timeout", "20", NULL} },
-    { .stressor_name = "stream",    .exec_args = {"stress-ng", "--stream", "1", "--stream-index", "3", "--timeout", "20", NULL} },
-    { .stressor_name = "tree",      .exec_args = {"stress-ng", "--tree", "1", "--maximize", "--timeout", "20", NULL} },
-    { .stressor_name = "tsearch",   .exec_args = {"stress-ng", "--tsearch", "1", "--maximize", "--timeout", "20", NULL} },
-    { .stressor_name = "vecmath",   .exec_args = {"stress-ng", "--vecmath", "1", "--timeout", "20", NULL} },
-    { .stressor_name = "wcs",       .exec_args = {"stress-ng", "--wcs", "1", "--timeout", "20", NULL} },
-    { .stressor_name = "zlib",      .exec_args = {"stress-ng", "--zlib", "1", "--timeout", "20", NULL} }
+    { .stressor_name = "bsearch",   .exec_args = {"stress-ng", "--bsearch", "1","--timeout", "20", NULL} },
+    { .stressor_name = "heapsort",  .exec_args = {"stress-ng", "--heapsort", "1","--timeout", "20", NULL} },
+    { .stressor_name = "hsearch",   .exec_args = {"stress-ng", "--hsearch", "1","--timeout", "20", NULL} },
+    { .stressor_name = "judy",      .exec_args = {"stress-ng", "--judy", "1", "--timeout", "20",NULL} },
+    { .stressor_name = "lockbus",   .exec_args = {"stress-ng", "--lockbus", "1","--timeout", "20", NULL} },
+    { .stressor_name = "lsearch",   .exec_args = {"stress-ng", "--lsearch", "1", "--timeout", "20",NULL} },
+    { .stressor_name = "malloc",    .exec_args = {"stress-ng", "--malloc", "1", "--timeout", "20",NULL} },
+    { .stressor_name = "matrix",    .exec_args = {"stress-ng", "--matrix", "1", "--timeout", "20",NULL} },
+    { .stressor_name = "membarrier",.exec_args = {"stress-ng", "--membarrier", "1", "--timeout", "20",NULL} },
+    { .stressor_name = "memcpy",    .exec_args = {"stress-ng", "--memcpy", "1","--timeout", "20", NULL} },
+    { .stressor_name = "mergesort", .exec_args = {"stress-ng", "--mergesort", "1", "--timeout", "20",NULL} },
+    { .stressor_name = "qsort",     .exec_args = {"stress-ng", "--qsort", "1", "--timeout", "20",NULL} },
+    { .stressor_name = "radixsort", .exec_args = {"stress-ng", "--radixsort", "1", "--timeout", "20",NULL} },
+    { .stressor_name = "shellsort", .exec_args = {"stress-ng", "--shellsort", "1", "--timeout", "20",NULL} },
+    { .stressor_name = "skiplist",  .exec_args = {"stress-ng", "--skiplist", "1", "--timeout", "20",NULL} },
+    { .stressor_name = "str",       .exec_args = {"stress-ng", "--str", "1", "--timeout", "20",NULL} },
+    { .stressor_name = "stream",    .exec_args = {"stress-ng", "--stream", "1", "--timeout", "20",NULL} },
+    { .stressor_name = "tree",      .exec_args = {"stress-ng", "--tree", "1", "--timeout", "20",NULL} },
+    { .stressor_name = "tsearch",   .exec_args = {"stress-ng", "--tsearch", "1", "--timeout", "20",NULL} },
+    { .stressor_name = "vecmath",   .exec_args = {"stress-ng", "--vecmath", "1", "--timeout", "20",NULL} },
+    { .stressor_name = "wcs",       .exec_args = {"stress-ng", "--wcs", "1", "--timeout", "20",NULL} },
+    { .stressor_name = "zlib",      .exec_args = {"stress-ng", "--zlib", "1", "--timeout", "20",NULL} },
+
+
+    { .stressor_name = "bsearch_max",   .exec_args = {"stress-ng", "--bsearch", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "heapsort_max",  .exec_args = {"stress-ng", "--heapsort", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "hsearch_max",   .exec_args = {"stress-ng", "--hsearch", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "judy_max",      .exec_args = {"stress-ng", "--judy", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "lsearch_max",   .exec_args = {"stress-ng", "--lsearch", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "malloc_max",    .exec_args = {"stress-ng", "--malloc", "1", "--malloc-max", "10000", "--malloc-bytes", "4096", "--timeout", "20", NULL} },
+    { .stressor_name = "matrix_max",    .exec_args = {"stress-ng", "--matrix", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "mergesort_max", .exec_args = {"stress-ng", "--mergesort", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "qsort_max",     .exec_args = {"stress-ng", "--qsort", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "radixsort_max", .exec_args = {"stress-ng", "--radixsort", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "shellsort_max", .exec_args = {"stress-ng", "--shellsort", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "skiplist_max",  .exec_args = {"stress-ng", "--skiplist", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "stream_max",    .exec_args = {"stress-ng", "--stream", "1", "--stream-index", "3", "--timeout", "20", NULL} },
+    { .stressor_name = "tree_max",      .exec_args = {"stress-ng", "--tree", "1", "--maximize", "--timeout", "20", NULL} },
+    { .stressor_name = "tsearch_max",   .exec_args = {"stress-ng", "--tsearch", "1", "--maximize", "--timeout", "20", NULL} }
 };
+
+// StressorConfig stress_battery[] = {
+//     // The Scientifically Validated L3 Thrasher
+//     { .stressor_name = "cache", .exec_args = {"stress-ng", "--cache", "1", "--cache-flush", "--cache-level", "3", "--timeout", "20", NULL} },
+    
+//     // Algorithmic & Memory Access Stressors
+//     { .stressor_name = "bsearch",   .exec_args = {"stress-ng", "--bsearch", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "heapsort",  .exec_args = {"stress-ng", "--heapsort", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "hsearch",   .exec_args = {"stress-ng", "--hsearch", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "judy",      .exec_args = {"stress-ng", "--judy", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "lockbus",   .exec_args = {"stress-ng", "--lockbus", "1", "--timeout", "20", NULL} },
+//     { .stressor_name = "lsearch",   .exec_args = {"stress-ng", "--lsearch", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "malloc",    .exec_args = {"stress-ng", "--malloc", "1", "--malloc-max", "10000", "--malloc-bytes", "4096", "--timeout", "20", NULL} },
+//     { .stressor_name = "matrix",    .exec_args = {"stress-ng", "--matrix", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "membarrier",.exec_args = {"stress-ng", "--membarrier", "1", "--timeout", "20", NULL}},
+//     { .stressor_name = "memcpy",    .exec_args = {"stress-ng", "--memcpy", "1", "--timeout", "20", NULL} },
+//     { .stressor_name = "mergesort", .exec_args = {"stress-ng", "--mergesort", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "qsort",     .exec_args = {"stress-ng", "--qsort", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "radixsort", .exec_args = {"stress-ng", "--radixsort", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "shellsort", .exec_args = {"stress-ng", "--shellsort", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "skiplist",  .exec_args = {"stress-ng", "--skiplist", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "str",       .exec_args = {"stress-ng", "--str", "1", "--timeout", "20", NULL} },
+//     { .stressor_name = "stream",    .exec_args = {"stress-ng", "--stream", "1", "--stream-index", "3", "--timeout", "20", NULL} },
+//     { .stressor_name = "tree",      .exec_args = {"stress-ng", "--tree", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "tsearch",   .exec_args = {"stress-ng", "--tsearch", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "vecmath",   .exec_args = {"stress-ng", "--vecmath", "1", "--timeout", "20", NULL} },
+//     { .stressor_name = "wcs",       .exec_args = {"stress-ng", "--wcs", "1", "--timeout", "20", NULL} },
+//     { .stressor_name = "zlib",      .exec_args = {"stress-ng", "--zlib", "1", "--timeout", "20", NULL} }
+// };
+
+// StressorConfig stress_battery[] = {
+//     // The Scientifically Validated L3 Thrasher    
+//     // Algorithmic & Memory Access Stressors
+//     { .stressor_name = "bsearch_max",   .exec_args = {"stress-ng", "--bsearch", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "heapsort_max",  .exec_args = {"stress-ng", "--heapsort", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "hsearch_max",   .exec_args = {"stress-ng", "--hsearch", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "judy_max",      .exec_args = {"stress-ng", "--judy", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "lsearch_max",   .exec_args = {"stress-ng", "--lsearch", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "malloc_max",    .exec_args = {"stress-ng", "--malloc", "1", "--malloc-max", "10000", "--malloc-bytes", "4096", "--timeout", "20", NULL} },
+//     { .stressor_name = "matrix_max",    .exec_args = {"stress-ng", "--matrix", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "mergesort_max", .exec_args = {"stress-ng", "--mergesort", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "qsort_max",     .exec_args = {"stress-ng", "--qsort", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "radixsort_max", .exec_args = {"stress-ng", "--radixsort", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "shellsort_max", .exec_args = {"stress-ng", "--shellsort", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "skiplist_max",  .exec_args = {"stress-ng", "--skiplist", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "stream_max",    .exec_args = {"stress-ng", "--stream", "1", "--stream-index", "3", "--timeout", "20", NULL} },
+//     { .stressor_name = "tree_max",      .exec_args = {"stress-ng", "--tree", "1", "--maximize", "--timeout", "20", NULL} },
+//     { .stressor_name = "tsearch_max",   .exec_args = {"stress-ng", "--tsearch", "1", "--maximize", "--timeout", "20", NULL} },
+
+// };
 
 void pin_to_core(int core_id) {
     cpu_set_t cpuset;
@@ -489,13 +526,28 @@ void get_spatioTemporal_memoryGram_ChromeMock(Clusters_t *Clusters, int NoC, uin
             uint64_t end_cluster = start_cluster + SST_us;
             
             // Polling Loop - traverse cluster's circular linked list using LNEXT
-            while (chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed) < end_cluster) {
-                // Access the cache line at curr
+            // while (chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed) < end_cluster) {
+            //     // Access the cache line at curr
+            //     maccessMy(curr);
+            //     curr = LNEXT(curr);
+            //     count++;
+            // }
+            int check_count = 0;
+
+            while (1) {
                 maccessMy(curr);
                 curr = LNEXT(curr);
                 count++;
+                
+                if (++check_count == ACCESSES_TILL_TIMER_POLL) {
+                    if (chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed) >= end_cluster) {
+                        break;
+                    }
+                    check_count = 0;
+                }
             }
-            
+
+
             // Store the access count
             matrix[s * NoC + c] = count;
         }
@@ -547,6 +599,8 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
     
     // For chrome mock timer (mode 1), enforce minimum 500us window by adjusting SST_cycles
     if (timer_mode == 1) {
+        // SST_cycles = 1144*setsPerCluster*l3_getAssociativity(l3);
+        SST_cycles = 2288*setsPerCluster*l3_getAssociativity(l3);
         uint64_t min_SST_cycles_for_500us = (500 * g_tsc_freq_hz) / 1000000;
         if (SST_cycles < min_SST_cycles_for_500us) {
             printf("[TIMER_MODE=1] SST_cycles adjusted: %lu -> %lu (minimum 500us window)\n", SST_cycles, min_SST_cycles_for_500us);
