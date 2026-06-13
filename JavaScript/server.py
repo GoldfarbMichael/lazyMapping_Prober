@@ -13,6 +13,10 @@ DATA_ROOT = "data"
 current_config = "manual"    # default fallback (e.g. "64C_2TST_45K_2288cycles")
 current_workload = "manual"  # default fallback (e.g. "qsort")
 
+# Coverage-validation coordinator state: the C prober (driver) sets the cluster the
+# browser should hammer; the browser polls it. -1 = idle/baseline, -2 = stop.
+ctl_cluster = -2
+
 
 def next_index(directory):
     """Next CSV index for a directory: max existing numeric stem + 1 (0 if none).
@@ -80,6 +84,25 @@ def collect():
 
     print(f"CSV written to: {log_file} ({len(csv_text)} bytes)")
     return jsonify(status="ok", path=log_file), 200
+
+
+# ---- Coverage-validation coordinator ----
+# The C prober drives the cluster index; the browser (mode=validate) polls it.
+
+@app.route("/ctl/set", methods=["POST"])
+def ctl_set():
+    # C driver sets which cluster the browser should hammer (-1 idle, -2 stop).
+    global ctl_cluster
+    data = request.get_json(force=True, silent=True) or {}
+    ctl_cluster = int(data.get("cluster", -2))
+    print(f"ctl: cluster -> {ctl_cluster}")
+    return jsonify(status="ok", cluster=ctl_cluster), 200
+
+
+@app.route("/ctl/poll", methods=["GET"])
+def ctl_poll():
+    # Browser polls the current cluster to hammer.
+    return jsonify(cluster=ctl_cluster), 200
 
 
 if __name__ == "__main__":

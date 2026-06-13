@@ -11,6 +11,7 @@
 // ----- Server / experiment config -----
 const COLLECTION_SERVER_URL = "http://localhost:8080/collect";
 const METADATA_SERVER_URL = "http://localhost:8080/set-metadata";
+const CTL_POLL_URL = "http://localhost:8080/ctl/poll"; // coverage-validation coordinator
 
 // ----- Experiment label (drives sampling params + storage path) -----
 // Format: {workload}_{NoC}C_{TST}TST_{K}K_{CYCLES}cycles
@@ -325,6 +326,60 @@ function sendResult(csv) {
     }).catch(err => console.error("Result POST failed:", err));
 }
 
+// ----- Coverage-validation mode (?mode=validate) -----
+// The browser is the "victim": it continuously hammers whichever cluster the C
+// coordinator (Mastik prober) currently asks for, in short bursts, re-polling
+// between bursts. The C side sets the cluster, waits, then prime+probes the real
+// LLC to see which physical sets this cluster contends on. No memorygram, no CSV.
+const HAMMER_BURST_MS = 100;   // hammer the current cluster this long between polls
+const CTL_CLUSTER_STOP = -2;   // coordinator signals "done"
+const CTL_CLUSTER_IDLE = -1;   // baseline: hammer nothing (measure noise floor)
+
+// Tight hammer of one cluster's circular list for `ms` (same chase as sweepCluster).
+function hammerCluster(mapping, clusterIndex, ms) {
+    const buffer = mapping.buffer;
+    const perf = performance;
+    let curr = mapping.heads[clusterIndex];
+    const finish = perf.now() + ms;
+    do {
+        for (let k = 0; k < K; k++) {
+            curr = buffer[curr];
+        }
+    } while (perf.now() < finish);
+    mapping._sink = curr; // defeat dead-code elimination
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function runValidation() {
+    const mapping = new LazyMapping(NUM_OF_CLUSTERS, LLC_SETS, LLC_WAYS);
+    setStatus("validating");
+    console.log("Validation mode: hammering clusters on demand from /ctl/poll");
+    for (;;) {
+        let cluster;
+        try {
+            const resp = await fetch(CTL_POLL_URL, { cache: "no-store" });
+            cluster = (await resp.json()).cluster;
+        } catch (err) {
+            console.error("ctl/poll failed:", err);
+            await sleep(200);
+            continue;
+        }
+        if (cluster === CTL_CLUSTER_STOP) {
+            setStatus("validate done");
+            console.log("Coordinator signaled stop.");
+            return;
+        }
+        if (cluster === CTL_CLUSTER_IDLE || cluster < 0 || cluster >= NUM_OF_CLUSTERS) {
+            await sleep(HAMMER_BURST_MS); // baseline: stay idle
+        } else {
+            hammerCluster(mapping, cluster, HAMMER_BURST_MS);
+        }
+    }
+}
+
 // ----- Entry point -----
 function startExperiment() {
     setStatus("running");
@@ -334,4 +389,8 @@ function startExperiment() {
     sendResult(csv).then(() => setStatus("done"));
 }
 
-sendMetadata().then(startExperiment);
+if (params.get("mode") === "validate") {
+    runValidation();
+} else {
+    sendMetadata().then(startExperiment);
+}

@@ -25,11 +25,20 @@ OBJS = $(SRCS:.c=.o)
 # Executable Name
 TARGET = MastikElite
 
+# Coverage validator (cross-process P+P against the JS lazy mapping).
+# Reuses every non-main object (utils/tests/mastikElite/murmur3) + its own main.
+COV_TARGET = CoverageValidator
+COV_SRCS = src/coverage_validator.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c
+COV_OBJS = $(COV_SRCS:.c=.o)
+
 # Build Rules
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $(TARGET) $(OBJS) $(LDFLAGS)
+
+$(COV_TARGET): $(COV_OBJS)
+	$(CC) $(CFLAGS) -o $(COV_TARGET) $(COV_OBJS) $(LDFLAGS)
 
 # Compile source files into object files
 %.o: %.c
@@ -41,6 +50,6 @@ mastik:
 	cd $(MASTIK_DIR)/src && $(MAKE)
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(OBJS) $(COV_OBJS) $(TARGET) $(COV_TARGET)
 
 .PHONY: all clean mastik
