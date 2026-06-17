@@ -11,7 +11,8 @@
 // ----- Server / experiment config -----
 const COLLECTION_SERVER_URL = "http://localhost:8080/collect";
 const METADATA_SERVER_URL = "http://localhost:8080/set-metadata";
-const CTL_POLL_URL = "http://localhost:8080/ctl/poll"; // coverage-validation coordinator
+const CTL_POLL_URL = "http://localhost:8080/ctl/poll"; // coverage-validation coordinator (poll cluster)
+const SAVE_SWEEP_URL = "http://localhost:8080/saveSweepTimes"; // persist /checkSweepingTime results
 
 // ----- Experiment label (drives sampling params + storage path) -----
 // Format: {workload}_{NoC}C_{TST}TST_{K}K_{CYCLES}cycles
@@ -327,36 +328,42 @@ function sendResult(csv) {
 }
 
 // ----- Coverage-validation mode (?mode=validate) -----
-// The browser is the "victim": it continuously hammers whichever cluster the C
-// coordinator (Mastik prober) currently asks for, in short bursts, re-polling
-// between bursts. The C side sets the cluster, waits, then prime+probes the real
-// LLC to see which physical sets this cluster contends on. No memorygram, no CSV.
-const HAMMER_BURST_MS = 100;   // hammer the current cluster this long between polls
-const CTL_CLUSTER_STOP = -2;   // coordinator signals "done"
-const CTL_CLUSTER_IDLE = -1;   // baseline: hammer nothing (measure noise floor)
-
-// Tight hammer of one cluster's circular list for `ms` (same chase as sweepCluster).
-function hammerCluster(mapping, clusterIndex, ms) {
-    const buffer = mapping.buffer;
-    const perf = performance;
-    let curr = mapping.heads[clusterIndex];
-    const finish = perf.now() + ms;
-    do {
-        for (let k = 0; k < K; k++) {
-            curr = buffer[curr];
-        }
-    } while (perf.now() < finish);
-    mapping._sink = curr; // defeat dead-code elimination
-}
+// The browser is the "victim", driven ONE-WAY by the C prober via the Flask
+// coordinator: C publishes which cluster to sweep (/ctl/set); the browser polls
+// (/ctl/poll) and sweeps that cluster continuously, in constant-size bursts, NEVER
+// acking back. Synchronization is purely temporal -- C waits a fixed spin per set
+// (sized to >= one sweep) and realigns (sets cluster + RAMP) when switching clusters.
+// Sentinels: cluster -1 = idle (baseline noise floor), -2 = stop. No memorygram.
+const CTL_IDLE = -1;
+const CTL_STOP = -2;
+// Re-poll the coordinator roughly every HAMMER_BURST_MS so a cluster change / stop (and
+// the idle baseline) is picked up promptly REGARDLESS of NoC. The clock is read once per
+// full sweep (not per access), so this is NOT the per-access timer overhead we removed --
+// it just bounds the burst by wall-time instead of an NoC-dependent sweep count (at low
+// NoC a fixed sweep count was seconds long and bled into the baseline).
+const HAMMER_BURST_MS = 50;
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Sweep one cluster's circular list ONCE: nodeCounts[c] dependent loads, touching
+// every line in the cluster a single time. Untimed -- no clock in the hot path.
+function hammerCluster(mapping, clusterIndex) {
+    const buffer = mapping.buffer;
+    let curr = mapping.heads[clusterIndex];
+    const n = mapping.nodeCounts[clusterIndex];
+    for (let i = 0; i < n; i++) {
+        curr = buffer[curr]; // probe line + advance
+    }
+    mapping._sink = curr; // defeat dead-code elimination
+}
+
 async function runValidation() {
     const mapping = new LazyMapping(NUM_OF_CLUSTERS, LLC_SETS, LLC_WAYS);
     setStatus("validating");
-    console.log("Validation mode: hammering clusters on demand from /ctl/poll");
+    console.log("Validation mode: sweeping clusters on demand from /ctl/poll (no acks).");
+
     for (;;) {
         let cluster;
         try {
@@ -364,19 +371,106 @@ async function runValidation() {
             cluster = (await resp.json()).cluster;
         } catch (err) {
             console.error("ctl/poll failed:", err);
-            await sleep(200);
+            await sleep(50);
             continue;
         }
-        if (cluster === CTL_CLUSTER_STOP) {
+        if (cluster === CTL_STOP) {
             setStatus("validate done");
             console.log("Coordinator signaled stop.");
             return;
         }
-        if (cluster === CTL_CLUSTER_IDLE || cluster < 0 || cluster >= NUM_OF_CLUSTERS) {
-            await sleep(HAMMER_BURST_MS); // baseline: stay idle
-        } else {
-            hammerCluster(mapping, cluster, HAMMER_BURST_MS);
+        if (cluster < 0 || cluster >= NUM_OF_CLUSTERS) {
+            await sleep(20); // idle (baseline): hammer nothing, stay responsive
+            continue;
         }
+        // Sweep this cluster continuously for ~HAMMER_BURST_MS, then loop back to re-poll.
+        // One clock read per full sweep (not per access) -> negligible overhead.
+        const burstEnd = performance.now() + HAMMER_BURST_MS;
+        do {
+            hammerCluster(mapping, cluster);
+        } while (performance.now() < burstEnd);
+    }
+}
+
+// ----- Sweep-time calibration (path /checkSweepingTime) -----
+// Measures how long ONE full untimed cluster traversal takes, to calibrate the C
+// prober's prime->probe spin. Run on an idle CPU with no Mastik for a clean baseline.
+// Pure JS, console output only -- no server interaction.
+//
+// Resolution note: one sweep (~100s of us) is near performance.now()'s clamp (~100 us
+// without cross-origin isolation), so each sample times a BATCH of back-to-back
+// traversals and divides -- this averages out clock quantization. Consequently min/max
+// are over batch means (the single-pass tail is smoothed); use the mean for calibration.
+const CHECK_NOC = 16;          // NoC to characterize (cluster size = LLC_SETS*ways/NoC)
+const CHECK_WARMUP = 50;       // discarded passes (cold L3 + JIT warmup)
+const CHECK_SAMPLES = 10000;    // reported samples
+const CHECK_BATCH = 20;        // traversals per timed batch (beats coarse perf.now resolution)
+const CHECK_START_DELAY_MS = 100; // grace period to disconnect the remote UI before measuring
+
+async function runCheckSweepingTime() {
+    const mapping = new LazyMapping(CHECK_NOC, LLC_SETS, LLC_WAYS);
+    const passLines = mapping.nodeCounts[0];
+    console.log(
+        `checkSweepingTime: NoC=${CHECK_NOC}, ${passLines} lines/pass, ` +
+        `${CHECK_SAMPLES} samples x ${CHECK_BATCH} passes/batch (after ${CHECK_WARMUP} warmup).`
+    );
+
+    // Grace period: disconnect VNC now so its framebuffer capture doesn't perturb the
+    // signal. Results are POSTed to the server, so no UI is needed to retrieve them.
+    for (let left = Math.ceil(CHECK_START_DELAY_MS / 1000); left > 0; left--) {
+        setStatus(`measuring in ${left}s (disconnect the remote UI now for a cleaner signal)`);
+        await sleep(1000);
+    }
+    setStatus("measuring sweep time");
+
+    for (let i = 0; i < CHECK_WARMUP; i++) hammerCluster(mapping, 0); // warm L3 + JIT
+
+    // Each sample = mean per-pass time (ms) over CHECK_BATCH back-to-back traversals.
+    const perPass = new Float64Array(CHECK_SAMPLES);
+    for (let s = 0; s < CHECK_SAMPLES; s++) {
+        const clusterIndex = s % CHECK_NOC;
+        const t0 = performance.now();
+        for (let b = 0; b < CHECK_BATCH; b++) hammerCluster(mapping, clusterIndex);
+        perPass[s] = (performance.now() - t0) / CHECK_BATCH;
+    }
+
+    const sorted = perPass.slice().sort(); // typed-array sort is numeric
+    const n = sorted.length;
+    const mean = perPass.reduce((a, b) => a + b, 0) / n;
+    const min = sorted[0];
+    const max = sorted[n - 1];
+    const median = sorted[(n / 2) | 0];
+    const p95 = sorted[(n * 0.95) | 0];
+    const std = Math.sqrt(perPass.reduce((a, b) => a + (b - mean) ** 2, 0) / n);
+    const summary = { mean, median, min, max, p95, std };
+
+    console.log("=== checkSweepingTime (ms per full cluster sweep) ===");
+    console.log(`  samples : ${n} (batch=${CHECK_BATCH}, warmup=${CHECK_WARMUP})`);
+    for (const [k, v] of Object.entries(summary)) console.log(`  ${k.padEnd(7)} : ${v.toFixed(4)} ms`);
+
+    // Persist to disk server-side (no client download required).
+    const payload = {
+        meta: {
+            noc: CHECK_NOC, linesPerPass: passLines, batch: CHECK_BATCH,
+            warmup: CHECK_WARMUP, samples: CHECK_SAMPLES,
+            llcSets: LLC_SETS, llcWays: LLC_WAYS,
+            userAgent: navigator.userAgent, timestamp: new Date().toISOString()
+        },
+        summary: summary,
+        perPassMs: Array.from(perPass)
+    };
+    try {
+        const resp = await fetch(SAVE_SWEEP_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        const info = await resp.json();
+        console.log(`Saved: ${info.json} / ${info.csv}`);
+        setStatus(`sweep-time done (mean ${mean.toFixed(3)} ms) -> ${info.csv}`);
+    } catch (err) {
+        console.error("saveSweepTimes POST failed:", err);
+        setStatus(`sweep-time done: mean ${mean.toFixed(3)} ms (SAVE FAILED)`);
     }
 }
 
@@ -389,8 +483,11 @@ function startExperiment() {
     sendResult(csv).then(() => setStatus("done"));
 }
 
-if (params.get("mode") === "validate") {
+const mode = params.get("mode");
+if (mode === "validate") {
     runValidation();
+} else if (mode === "checkSweepingTime" || window.location.pathname.endsWith("/checkSweepingTime")) {
+    runCheckSweepingTime();
 } else {
     sendMetadata().then(startExperiment);
 }

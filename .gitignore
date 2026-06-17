@@ -38,3 +38,5 @@ stable/latex/
 # Python bytecode
 __pycache__/
 *.pyc
+
+*.png

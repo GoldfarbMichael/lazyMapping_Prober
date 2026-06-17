@@ -1,6 +1,8 @@
 from flask import Flask, request, send_from_directory, jsonify
 from flask_cors import CORS
 import os
+import json
+import time
 
 app = Flask(__name__)
 CORS(app, resources={
@@ -13,9 +15,11 @@ DATA_ROOT = "data"
 current_config = "manual"    # default fallback (e.g. "64C_2TST_45K_2288cycles")
 current_workload = "manual"  # default fallback (e.g. "qsort")
 
-# Coverage-validation coordinator state: the C prober (driver) sets the cluster the
-# browser should hammer; the browser polls it. -1 = idle/baseline, -2 = stop.
-ctl_cluster = -2
+# Coverage-validation coordinator state: one-way (C prober -> browser). The C prober
+# publishes which cluster the browser should sweep; the browser polls and sweeps it
+# continuously, never acking. -1 = idle (baseline), -2 = stop. Default IDLE so a page
+# that loads before the prober's first /ctl/set stays idle instead of exiting.
+ctl_cluster = -1
 
 
 def next_index(directory):
@@ -44,6 +48,13 @@ def index():
     #          ├─ main.js
     #          ├─ worker.js
     #          └─ server.py
+    return send_from_directory("", "index.html")
+
+
+# Sweep-time calibration page: same index.html (main.js detects the path and runs the
+# /checkSweepingTime measurement instead of the memorygram experiment).
+@app.get("/checkSweepingTime")
+def check_sweeping_time():
     return send_from_directory("", "index.html")
 
 
@@ -86,25 +97,55 @@ def collect():
     return jsonify(status="ok", path=log_file), 200
 
 
-# ---- Coverage-validation coordinator ----
-# The C prober drives the cluster index; the browser (mode=validate) polls it.
+@app.route("/saveSweepTimes", methods=["POST"])
+def save_sweep_times():
+    # /checkSweepingTime POSTs its full result here so the data is persisted to disk
+    # (no client download needed -- the operator can disconnect the remote UI). Writes
+    # both a complete .json (meta + summary + every sample) and a .csv (raw samples).
+    payload = request.get_json(force=True, silent=True) or {}
+    meta = payload.get("meta", {})
+    summary = payload.get("summary", {})
+    samples = payload.get("perPassMs", [])
+
+    directory = os.path.join(DATA_ROOT, "sweep_times")
+    os.makedirs(directory, exist_ok=True)
+    base = f"sweeptime_NoC{meta.get('noc', 'NA')}_{time.strftime('%Y%m%d_%H%M%S')}"
+
+    json_path = os.path.join(directory, base + ".json")
+    with open(json_path, "w") as f:
+        json.dump(payload, f, indent=2)
+
+    csv_path = os.path.join(directory, base + ".csv")
+    with open(csv_path, "w") as f:
+        for k, v in {**meta, **summary}.items():
+            f.write(f"# {k},{v}\n")   # metadata + summary as leading comment lines
+        f.write("sample_index,per_pass_ms\n")
+        for i, v in enumerate(samples):
+            f.write(f"{i},{v}\n")
+
+    print(f"Sweep times written: {json_path} / {csv_path} ({len(samples)} samples)")
+    return jsonify(status="ok", json=json_path, csv=csv_path, samples=len(samples)), 200
+
+
+# ---- Coverage-validation coordinator (one-way: C prober -> browser) ----
 
 @app.route("/ctl/set", methods=["POST"])
 def ctl_set():
-    # C driver sets which cluster the browser should hammer (-1 idle, -2 stop).
+    # C driver publishes which cluster the browser should sweep (-1 idle, -2 stop).
     global ctl_cluster
     data = request.get_json(force=True, silent=True) or {}
-    ctl_cluster = int(data.get("cluster", -2))
+    ctl_cluster = int(data.get("cluster", -1))
     print(f"ctl: cluster -> {ctl_cluster}")
     return jsonify(status="ok", cluster=ctl_cluster), 200
 
 
 @app.route("/ctl/poll", methods=["GET"])
 def ctl_poll():
-    # Browser polls the current cluster to hammer.
+    # Browser reads the current cluster to sweep.
     return jsonify(cluster=ctl_cluster), 200
 
 
 if __name__ == "__main__":
-    # run on http://localhost:8080
-    app.run(host="0.0.0.0", port=8080, debug=True)
+    # run on http://localhost:8080. threaded=True so the C driver and the browser can
+    # have concurrent in-flight requests without head-of-line blocking each other.
+    app.run(host="0.0.0.0", port=8080, debug=True, threaded=True)
