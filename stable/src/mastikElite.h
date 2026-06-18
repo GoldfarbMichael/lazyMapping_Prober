@@ -30,6 +30,11 @@ extern StressorConfig stress_battery[];
 #define NUM_STRESSORS (sizeof(stress_battery) / sizeof(StressorConfig))
 #define SAMPLES_PER_STRESSOR 5 //default samples for each batch for each stressor
 
+// Runtime accessor for the battery size. NUM_STRESSORS uses sizeof(stress_battery), which
+// only works in the translation unit that DEFINES the array (mastikElite.c); other units
+// see an incomplete extern type. Call this from elsewhere (e.g. fingerprint_orchestrator).
+size_t stress_battery_count(void);
+
 // Function declarations
 void pin_to_core(int core_id);
 void cleanup_handler(int sig);

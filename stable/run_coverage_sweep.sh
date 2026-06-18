@@ -34,7 +34,8 @@ if ! [[ "$ITERS" =~ ^[0-9]+$ ]] || [ "$ITERS" -lt 1 ]; then
 fi
 
 # ALL_NOCS=(2 4 8 16 32 64)
-ALL_NOCS=(64 32 16 8 4 2)
+# ALL_NOCS=(32 16 8 4 2)
+ALL_NOCS=(64)
 
 if [ -n "$ONLY_NOC" ]; then
     valid=0
@@ -57,9 +58,17 @@ server_up() {
 }
 
 # ---- pre-flight ----
+# Grant root access to :0 using the SAME display/cookie the C tool gives Chrome. Without
+# the explicit DISPLAY/XAUTHORITY this fails (your ~/.Xauthority is the :1 Xtigervnc
+# cookie, not :0's gdm cookie) -- and then Chrome gets "No protocol specified" and the
+# browser never hammers, so every CSV is just the noise floor. Machine-specific (uid 1000).
 echo "[sweep] granting root access to X display :0 (xhost)"
-xhost +SI:localuser:root >/dev/null 2>&1 || \
-    echo "[sweep] WARNING: xhost failed -- Chrome may not reach :0"
+if DISPLAY=:0 XAUTHORITY=/run/user/1000/gdm/Xauthority xhost +SI:localuser:root >/dev/null 2>&1; then
+    echo "[sweep] xhost grant OK"
+else
+    echo "[sweep] WARNING: xhost grant FAILED -- Chrome will not reach :0 and data will be"
+    echo "        noise. Fix X access before trusting results." >&2
+fi
 
 echo "[sweep] building CoverageValidator"
 make CoverageValidator || { echo "[sweep] build failed" >&2; exit 1; }

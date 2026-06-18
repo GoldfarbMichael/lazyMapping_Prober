@@ -119,6 +119,10 @@ StressorConfig stress_battery[] = {
 
 // };
 
+size_t stress_battery_count(void) {
+    return NUM_STRESSORS;
+}
+
 void pin_to_core(int core_id) {
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);

@@ -31,6 +31,12 @@ COV_TARGET = CoverageValidator
 COV_SRCS = src/coverage_validator.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c
 COV_OBJS = $(COV_SRCS:.c=.o)
 
+# Fingerprint orchestrator (real-browser Stage 3: drives Chrome JS sampling + stress-ng).
+# Reuses the same non-main objects + its own main.
+FP_TARGET = FingerprintOrchestrator
+FP_SRCS = src/fingerprint_orchestrator.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c
+FP_OBJS = $(FP_SRCS:.c=.o)
+
 # Build Rules
 all: $(TARGET)
 
@@ -39,6 +45,9 @@ $(TARGET): $(OBJS)
 
 $(COV_TARGET): $(COV_OBJS)
 	$(CC) $(CFLAGS) -o $(COV_TARGET) $(COV_OBJS) $(LDFLAGS)
+
+$(FP_TARGET): $(FP_OBJS)
+	$(CC) $(CFLAGS) -o $(FP_TARGET) $(FP_OBJS) $(LDFLAGS)
 
 # Compile source files into object files
 %.o: %.c
@@ -50,6 +59,6 @@ mastik:
 	cd $(MASTIK_DIR)/src && $(MAKE)
 
 clean:
-	rm -f $(OBJS) $(COV_OBJS) $(TARGET) $(COV_TARGET)
+	rm -f $(OBJS) $(COV_OBJS) $(FP_OBJS) $(TARGET) $(COV_TARGET) $(FP_TARGET)
 
 .PHONY: all clean mastik
