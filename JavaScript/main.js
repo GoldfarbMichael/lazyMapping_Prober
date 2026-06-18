@@ -13,6 +13,11 @@ const COLLECTION_SERVER_URL = "http://localhost:8080/collect";
 const METADATA_SERVER_URL = "http://localhost:8080/set-metadata";
 const CTL_POLL_URL = "http://localhost:8080/ctl/poll"; // coverage-validation coordinator (poll cluster)
 const SAVE_SWEEP_URL = "http://localhost:8080/saveSweepTimes"; // persist /checkSweepingTime results
+// Fingerprinting coordinator (?mode=fingerprint): bidirectional handshake with the C
+// orchestrator. Browser reports readiness, polls for sample requests, acks completion.
+const FP_READY_URL = "http://localhost:8080/fp/ready";
+const FP_POLL_URL = "http://localhost:8080/fp/poll";
+const FP_DONE_URL = "http://localhost:8080/fp/done";
 
 // ----- Experiment label (drives sampling params + storage path) -----
 // Format: {workload}_{NoC}C_{TST}TST_{K}K_{CYCLES}cycles
@@ -237,8 +242,10 @@ class LazyMapping {
 // ----- Memorygram sampling loop (placeholder) -----
 // TODO (next step): replace with the real "Sampling Procedure" -
 // for each time slot, sweep C0..C(NoC-1) and record completed accesses.
-function sampleMemorygram() {
-    const mapping = new LazyMapping(NUM_OF_CLUSTERS, LLC_SETS, LLC_WAYS);
+function sampleMemorygram(prebuiltMapping) {
+    // Reuse a prebuilt mapping when one is supplied (fingerprint mode builds it ONCE and
+    // reuses it for the whole collection); otherwise build a fresh one (single-shot mode).
+    const mapping = prebuiltMapping || new LazyMapping(NUM_OF_CLUSTERS, LLC_SETS, LLC_WAYS);
 
     // --- Geometry cross-check (verification) ---
     const geomBytes = LLC_SETS * LLC_WAYS * BYTES_PER_LINE;
@@ -474,6 +481,59 @@ async function runCheckSweepingTime() {
     }
 }
 
+// ----- Fingerprinting mode (?mode=fingerprint) -----
+// Real-browser Stage 3: the C orchestrator runs stress-ng on another core and drives the
+// collection via the Flask coordinator. We build the lazy mapping ONCE, then loop:
+// poll for a sample request, sample the memorygram (NO network in the loop), POST the CSV,
+// ack /fp/done. The seq edge-guard (seq > lastSeq) prevents re-sampling while the command
+// is still "sample" between our ack and the orchestrator's next request.
+//
+// IMPORTANT: no fetch happens during sampleMemorygram() -- network only between samples.
+async function runFingerprint() {
+    const mapping = new LazyMapping(NUM_OF_CLUSTERS, LLC_SETS, LLC_WAYS);
+    setStatus("fingerprint: mapping built, waiting for sample requests");
+
+    // Tell the orchestrator the mapping is ready (it blocks on /fp/state until this).
+    await fetch(FP_READY_URL, { method: "POST" }).catch(err => console.error("fp/ready failed:", err));
+
+    let lastSeq = 0;
+    for (;;) {
+        let cmd, seq;
+        try {
+            const resp = await fetch(FP_POLL_URL, { cache: "no-store" });
+            const j = await resp.json();
+            cmd = j.cmd;
+            seq = j.seq;
+        } catch (err) {
+            console.error("fp/poll failed:", err);
+            await sleep(50);
+            continue;
+        }
+
+        if (cmd === "stop") {
+            setStatus("fingerprint done");
+            console.log("Orchestrator signaled stop.");
+            return;
+        }
+
+        if (cmd === "sample" && seq > lastSeq) {
+            setStatus(`fingerprint: sampling seq=${seq}`);
+            // Sample against the prebuilt mapping -- synchronous, zero network calls.
+            const result = sampleMemorygram(mapping);
+            const csv = memorygramToCsv(result.memorygram, NUM_OF_CLUSTERS);
+            await sendResult(csv);                                   // POST /collect
+            await fetch(FP_DONE_URL, {                              // ack this seq
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ seq: seq })
+            }).catch(err => console.error("fp/done failed:", err));
+            lastSeq = seq;
+        } else {
+            await sleep(20); // idle / already-handled seq: stay responsive, no sampling
+        }
+    }
+}
+
 // ----- Entry point -----
 function startExperiment() {
     setStatus("running");
@@ -486,6 +546,8 @@ function startExperiment() {
 const mode = params.get("mode");
 if (mode === "validate") {
     runValidation();
+} else if (mode === "fingerprint") {
+    runFingerprint();
 } else if (mode === "checkSweepingTime" || window.location.pathname.endsWith("/checkSweepingTime")) {
     runCheckSweepingTime();
 } else {

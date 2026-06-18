@@ -30,15 +30,23 @@ server_up() {
     curl -s -o /dev/null --max-time 2 "http://127.0.0.1:8080/fp/state"
 }
 
+CLEANED=0
 cleanup() {
-    echo "[sweep] cleanup: stopping stressors / chrome / server"
+    [ "$CLEANED" = 1 ] && return   # idempotent: EXIT trap may fire after an INT/TERM exit
+    CLEANED=1
+    echo "[sweep] cleanup: stopping orchestrator / chrome / stressors / server"
+    # The orchestrator + its Chrome are root-owned. On a terminal Ctrl+C the orchestrator
+    # already got SIGINT (same foreground group) and self-tears-down its Chrome; these
+    # sudo pkills are a backstop for non-terminal kills (need root, hence sudo).
+    sudo pkill -9 -f FingerprintOrchestrator >/dev/null 2>&1 || true
+    sudo pkill -9 -f 'user-data-dir=/tmp/chrome-fingerprint' >/dev/null 2>&1 || true
     sudo pkill -9 stress-ng >/dev/null 2>&1 || true
-    sudo pkill -f 'user-data-dir=/tmp/chrome-fingerprint' >/dev/null 2>&1 || true
-    if [ -n "$SERVER_PID" ]; then
-        kill "$SERVER_PID" >/dev/null 2>&1 || true
-    fi
+    [ -n "$SERVER_PID" ] && kill "$SERVER_PID" >/dev/null 2>&1 || true
 }
-trap cleanup EXIT INT TERM
+# INT/TERM -> exit, which fires the EXIT trap (cleanup) ONCE and stops the sweep loop.
+# (A plain `trap cleanup INT` would clean up but then let the for-loop spawn the next NoC.)
+trap 'exit 130' INT TERM
+trap cleanup EXIT
 
 # ---- pre-flight ----
 # Grant root access to :0 using the SAME display/cookie the orchestrator gives Chrome.

@@ -174,6 +174,18 @@ static pid_t launch_chrome(int noc) {
 
 
 
+// Signal handler: tear down OUR Chrome (the whole process tree, matched by its profile
+// dir) and any stressor, then exit. A terminal Ctrl+C delivers SIGINT to the whole
+// foreground group, so this root process receives it directly and self-cleans -- no
+// orphaned Chrome/stress-ng. (system() in a handler isn't async-signal-safe, but this is
+// the existing project pattern for a cleanup-then-exit handler.)
+static void fp_cleanup(int sig) {
+    (void)sig;
+    system("pkill -9 -f 'user-data-dir=" CHROME_PROFILE "'");
+    system("pkill -9 stress-ng");
+    _exit(130);
+}
+
 // Block until the browser has built the mapping (/fp/state ready), or time out.
 static int wait_ready(void) {
     char resp[512];
@@ -212,8 +224,8 @@ int main(int argc, char **argv) {
     }
     int noc = atoi(argv[1]);
 
-    signal(SIGINT, cleanup_handler);   // kills stray stress-ng on Ctrl+C / TERM
-    signal(SIGTERM, cleanup_handler);
+    signal(SIGINT, fp_cleanup);   // self-tear-down Chrome + stress-ng on Ctrl+C / TERM
+    signal(SIGTERM, fp_cleanup);
 
     // Keep cores 0/1 reserved for Chrome / stress-ng; the orchestrator just coordinates.
     pin_to_core(ORCH_CORE);

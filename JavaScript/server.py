@@ -21,6 +21,14 @@ current_workload = "manual"  # default fallback (e.g. "qsort")
 # that loads before the prober's first /ctl/set stays idle instead of exiting.
 ctl_cluster = -1
 
+# Fingerprinting coordinator state: bidirectional handshake (C orchestrator <-> browser).
+# The browser builds the lazy mapping once and reports "ready"; thereafter the C side
+# issues sample requests (bumping "seq") while a stress-ng workload runs on another core,
+# the browser samples the memorygram with NO network in the loop, POSTs the CSV to
+# /collect, then acks /fp/done with that seq. The seq token makes the handshake race-free
+# (exactly one /collect per /fp/cmd). "workload" rides along so /collect's path is right.
+fp = {"seq": 0, "cmd": "idle", "workload": "", "ready": False, "done_seq": -1}
+
 
 def next_index(directory):
     """Next CSV index for a directory: max existing numeric stem + 1 (0 if none).
@@ -143,6 +151,69 @@ def ctl_set():
 def ctl_poll():
     # Browser reads the current cluster to sweep.
     return jsonify(cluster=ctl_cluster), 200
+
+
+# ---- Fingerprinting coordinator (bidirectional: C orchestrator <-> browser) ----
+
+@app.route("/fp/ready", methods=["POST"])
+def fp_ready():
+    # Browser: lazy mapping built, ready to receive sample requests.
+    fp["ready"] = True
+    print("fp: browser ready (mapping built)")
+    return jsonify(status="ok"), 200
+
+
+@app.route("/fp/poll", methods=["GET"])
+def fp_poll():
+    # Browser polls for the next command (between samples; never during sampling).
+    return jsonify(seq=fp["seq"], cmd=fp["cmd"], workload=fp["workload"]), 200
+
+
+@app.route("/fp/done", methods=["POST"])
+def fp_done():
+    # Browser acks that it sampled + saved the CSV for the given seq.
+    data = request.get_json(force=True, silent=True) or {}
+    fp["done_seq"] = int(data.get("seq", -1))
+    print(f"fp: done seq -> {fp['done_seq']}")
+    return jsonify(status="ok", done_seq=fp["done_seq"]), 200
+
+
+@app.route("/fp/cmd", methods=["POST"])
+def fp_cmd():
+    # C orchestrator: request a sample (with its workload/config so /collect's path is
+    # correct) or signal stop. "sample" bumps seq so the browser fires exactly once.
+    global current_config, current_workload
+    data = request.get_json(force=True, silent=True) or {}
+    cmd = data.get("cmd", "idle")
+    if cmd == "sample":
+        # Set the /collect path globals BEFORE advancing seq so the browser never samples
+        # against a stale workload/config.
+        current_workload = data.get("workload", "manual")
+        current_config = data.get("config", "manual")
+        fp["workload"] = current_workload
+        fp["cmd"] = "sample"
+        fp["seq"] += 1
+        print(f"fp: sample seq={fp['seq']} workload={current_workload} config={current_config}")
+        return jsonify(status="ok", seq=fp["seq"]), 200
+    fp["cmd"] = cmd  # "stop" / "idle"
+    print(f"fp: cmd -> {cmd}")
+    return jsonify(status="ok", cmd=cmd), 200
+
+
+@app.route("/fp/state", methods=["GET"])
+def fp_state():
+    # C orchestrator reads readiness + the latest acked seq.
+    return jsonify(ready=fp["ready"], seq=fp["seq"], done_seq=fp["done_seq"]), 200
+
+
+@app.route("/fp/reset", methods=["POST"])
+def fp_reset():
+    # C orchestrator calls this at startup (BEFORE launching Chrome) so a stale "ready"
+    # from a previous, now-dead browser can't make wait_ready() pass before the NEW
+    # browser has built its mapping. Returns the coordinator to its initial state.
+    fp.update(seq=0, cmd="idle", workload="", ready=False, done_seq=-1)
+    print("fp: reset")
+    return jsonify(status="ok"), 200
 
 
 if __name__ == "__main__":
