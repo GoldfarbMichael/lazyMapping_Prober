@@ -34,8 +34,8 @@ if ! [[ "$ITERS" =~ ^[0-9]+$ ]] || [ "$ITERS" -lt 1 ]; then
 fi
 
 # ALL_NOCS=(2 4 8 16 32 64)
-# ALL_NOCS=(32 16 8 4 2)
-ALL_NOCS=(64)
+ALL_NOCS=(32 16 8 4 2)
+# ALL_NOCS=(64)
 
 if [ -n "$ONLY_NOC" ]; then
     valid=0

@@ -64,6 +64,13 @@ const LLC_SIZE_MB = 12;            // cross-checked against LLC_SETS * LLC_WAYS
 const CLOCK_SPEED = 3.6e9;         // CPU clock in Hz (cycles/sec); NOT the browser timer
 const MIN_QUANTUM_MS = 0.5;        // floor: never sweep a cluster for less than 500 us
 
+// ----- Dynamic-K config (K === 0 in the label selects the dynamic-K sweep) -----
+// Instead of a fixed accesses-per-timer-poll, start each quantum with a large batch
+// and shrink it toward the deadline (see sweepClusterDynamicK), polling the clock only
+// a handful of times per quantum instead of hundreds.
+const MIN_DYNAMIC_K = 90;          // floor: never poll more often than every 90 accesses
+const DYNAMIC_K_ALPHA = 0.5;       // damping on remaining-time when sizing the next batch
+
 // Q (ms): budget to sweep one cluster, sized to ~one full cluster traversal
 // (setsPerCluster * ways addresses) at CLOCK_SPEED, then floored to MIN_QUANTUM_MS.
 function computeQuantumMs(noc, llcSets, llcWays, cyclesPerAddress) {
@@ -237,6 +244,41 @@ class LazyMapping {
         this._sink = curr; // keep the chain observable (prevents dead-code elimination )
         return count;
     }
+
+    // Dynamic-K variant of sweepCluster: same latency-bound pointer-chase, but the batch
+    // size between clock polls adapts instead of being fixed at K. Start with `initialK`
+    // (sized to ~4 cluster sweeps), then after each batch derive the access rate from the
+    // batch's measured duration and size the next batch to a damped fraction (DYNAMIC_K_ALPHA)
+    // of the time remaining, floored at MIN_DYNAMIC_K. This is closed-loop on remaining TIME
+    // (not open-loop on K): batches shrink to the floor as the deadline nears, so the batch
+    // straddling the deadline is ~MIN_DYNAMIC_K -> overshoot is tiny (~0.1% of count) and
+    // roughly constant across sweeps/clusters (uniform noise the z-scoring classifier removes).
+    // ~5-9 polls/quantum vs hundreds for a small fixed K.
+    sweepClusterDynamicK(clusterIndex, quantumMs, initialK) {
+        const buffer = this.buffer;
+        const perf = performance;
+        let curr = this.heads[clusterIndex];
+        let count = 0;
+        let k = initialK;
+        let prev = perf.now();
+        const finish = prev + quantumMs;
+        for (;;) {
+            for (let i = 0; i < k; i++) {
+                curr = buffer[curr]; // probe line + advance
+            }
+            count += k;
+            const now = perf.now();
+            if (now >= finish) break;
+            const batchMs = now - prev;
+            prev = now;
+            const remaining = finish - now;
+            k = batchMs > 0
+                ? Math.max(MIN_DYNAMIC_K, Math.floor((k / batchMs) * remaining * DYNAMIC_K_ALPHA))
+                : MIN_DYNAMIC_K;
+        }
+        this._sink = curr; // keep the chain observable (prevents dead-code elimination)
+        return count;
+    }
 }
 
 // ----- Memorygram sampling loop (placeholder) -----
@@ -271,6 +313,15 @@ function sampleMemorygram(prebuiltMapping) {
 
     const memorygram = [];
 
+    // K === 0 (from the label) selects the dynamic-K sweep. initialK is sized to ~4 sweeps
+    // of ONE cluster (per-cluster lines = LLC_SETS*LLC_WAYS/NoC = nodeCounts[c], equal across
+    // clusters for pow2 NoC), computed ONCE here rather than per slot/cluster.
+    const dynamicK = (K === 0);
+    const initialK = dynamicK ? mapping.nodeCounts[0] * 4 : 0;
+    if (dynamicK) {
+        console.log(`Dynamic K: initialK=${initialK} (~4 cluster sweeps), floor=${MIN_DYNAMIC_K}, alpha=${DYNAMIC_K_ALPHA}`);
+    }
+
     // Align sampling to a fresh timer edge: spin until the clock ticks, so the
     // first quantum starts right at a clock boundary (not mid-tick).
     const edge = performance.now();
@@ -280,7 +331,9 @@ function sampleMemorygram(prebuiltMapping) {
     for (let t = 0; t < NUM_TIME_SLOTS; t++) {
         const row = new Array(NUM_OF_CLUSTERS).fill(0);
         for (let c = 0; c < NUM_OF_CLUSTERS; c++) {
-            row[c] = mapping.sweepCluster(c, QUANTUM_MS);
+            row[c] = dynamicK
+                ? mapping.sweepClusterDynamicK(c, QUANTUM_MS, initialK)
+                : mapping.sweepCluster(c, QUANTUM_MS);
         }
         memorygram.push(row);
     }

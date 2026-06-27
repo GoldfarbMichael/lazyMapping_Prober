@@ -57,6 +57,7 @@
 #define SPIN_US_AT_16 800
 #define BUILD_WAIT_S  10          // fixed wait for Chrome to load + build the lazy mapping
 #define RAMP_MS       400         // realign delay after switching cluster, before scanning
+#define BASELINE_ROWS 15           // number of idle baseline rows to collect (noise floor)
 
 #define DATA_DIR      "data/coverage"   // outputs go under stable/data/coverage/
 #define CHROME_PROFILE "/tmp/chrome-validate"
@@ -224,7 +225,7 @@ int main(int argc, char **argv) {
     //    clusters we realign (set the new cluster + RAMP wait) so the browser has
     //    switched and is hammering steadily before we start probing.
     uint16_t *matrix   = calloc((size_t)noc * numSets, sizeof(uint16_t));
-    uint16_t *baseline = calloc(numSets, sizeof(uint16_t));
+    uint16_t *baseline = calloc((size_t)BASELINE_ROWS * numSets, sizeof(uint16_t));
 
     for (int c = 0; c < noc; c++) {
         ctl_set(c);                      // request: sweep cluster c
@@ -236,10 +237,12 @@ int main(int argc, char **argv) {
     }
 
     // 4. Baseline: browser idle (sweeps nothing), same spin window, for the noise floor.
-    // ctl_set(CTL_IDLE);
-    usleep(RAMP_MS * 1000);
-    printf("[cov] baseline scan (JS idle)...\n");
-    scan_all_sets(l3, e_sets, numSets, baseline, spinCycles);
+    ctl_set(CTL_IDLE);
+    for (int b = 0; b < BASELINE_ROWS; b++) {
+        usleep(RAMP_MS * 1000);
+        printf("[cov] baseline scan %d/%d (JS idle)...\n", b + 1, BASELINE_ROWS);
+        scan_all_sets(l3, e_sets, numSets, &baseline[(size_t)b * numSets], spinCycles);
+    }
 
     // 5. Stop the browser and tear down chrome.
     ctl_set(CTL_STOP);
@@ -260,10 +263,14 @@ int main(int argc, char **argv) {
                 fprintf(fm, "%s%u", i ? "," : "", matrix[(size_t)c * numSets + i]);
             fprintf(fm, "\n");
         }
-        for (int i = 0; i < numSets; i++) fprintf(fm, "%s%u", i ? "," : "", baseline[i]);
-        fprintf(fm, "\n");
+        for (int b = 0; b < BASELINE_ROWS; b++) {
+            for (int i = 0; i < numSets; i++)
+                fprintf(fm, "%s%u", i ? "," : "", baseline[(size_t)b * numSets + i]);
+            fprintf(fm, "\n");
+        }
         fclose(fm);
-        printf("[cov] wrote %s (%d clusters + baseline x %d sets)\n", missPath, noc, numSets);
+        printf("[cov] wrote %s (%d clusters + %d baseline x %d sets)\n",
+               missPath, noc, BASELINE_ROWS, numSets);
     } else {
         perror("fopen miss matrix");
     }
