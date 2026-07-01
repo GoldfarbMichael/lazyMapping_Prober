@@ -48,7 +48,7 @@
 // NoC comes from argv; the rest match the JS defaults / the main stress-ng eval config.
 #define FP_TST         2           // total sampling time (s)
 #define FP_K           0          // accesses between timer polls (JS side)
-#define FP_CYCLES      2288        // est. CPU cycles per address (JS Q sizing)
+#define FP_CYCLES      4576        // est. CPU cycles per address (JS Q sizing)
 
 #define COOLDOWN_S     5           // cooldown between samples (let the L3 return to baseline)
 #define STEADY_US      50000       // grace for the stressor to reach its loop before sampling

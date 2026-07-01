@@ -461,7 +461,7 @@ async function runValidation() {
 // without cross-origin isolation), so each sample times a BATCH of back-to-back
 // traversals and divides -- this averages out clock quantization. Consequently min/max
 // are over batch means (the single-pass tail is smoothed); use the mean for calibration.
-const CHECK_NOC = 16;          // NoC to characterize (cluster size = LLC_SETS*ways/NoC)
+const CHECK_NOC = 32;          // NoC to characterize (cluster size = LLC_SETS*ways/NoC)
 const CHECK_WARMUP = 50;       // discarded passes (cold L3 + JIT warmup)
 const CHECK_SAMPLES = 10000;    // reported samples
 const CHECK_BATCH = 20;        // traversals per timed batch (beats coarse perf.now resolution)

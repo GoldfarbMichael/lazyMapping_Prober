@@ -7,6 +7,8 @@ CLAUDE.md
 
 # Log files
 *.jsonl
+*.json
+
 *.log
 *.txt
 *.patch
