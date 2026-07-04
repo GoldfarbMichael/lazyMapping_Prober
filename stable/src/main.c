@@ -197,11 +197,14 @@ int main(int argc, char **argv) {
     int first_positional_arg = 1;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-c") == 0) {
-            timer_mode = 1;  // Chrome mock timer
+            timer_mode = 1;  // Chrome mock timer, Mastik loaded-e_set clusters
             printf("[INFO] Timer Mode: Chrome Mock (-c)\n");
         } else if (strcmp(argv[i], "-n") == 0) {
             timer_mode = 0;  // Native rdtscp64
             printf("[INFO] Timer Mode: Native rdtscp64 (-n)\n");
+        } else if (strcmp(argv[i], "-j") == 0) {
+            timer_mode = 2;  // Chrome mock timer, JS-style lazy-map victim
+            printf("[INFO] Timer Mode: Chrome Mock + JS-style lazy map (-j)\n");
         } else if (argv[i][0] != '-') {
             // First non-flag argument starts positional args
             first_positional_arg = i;
@@ -235,8 +238,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "\n❌ USAGE ERROR:\n");
         fprintf(stderr, "Usage: %s [OPTS] <start_iteration> <batch_size> [output_dir]\n\n", argv[0]);
         fprintf(stderr, "Options:\n");
-        fprintf(stderr, "  -c              : Use Chrome mock timer (jittered, 100us clamped)\n");
-        fprintf(stderr, "  -n              : Use native rdtscp64 timer (default)\n\n");
+        fprintf(stderr, "  -c              : Use Chrome mock timer (jittered, 100us clamped), Mastik e_set clusters\n");
+        fprintf(stderr, "  -n              : Use native rdtscp64 timer (default)\n");
+        fprintf(stderr, "  -j              : Use Chrome mock timer with the JS-style lazy-map victim\n\n");
         fprintf(stderr, "Arguments:\n");
         fprintf(stderr, "  start_iteration : Starting index for this batch (0-based)\n");
         fprintf(stderr, "  batch_size      : Number of iterations to run in this batch\n");

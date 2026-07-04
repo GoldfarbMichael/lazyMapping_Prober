@@ -19,7 +19,7 @@ LDFLAGS = -L$(MASTIK_DIR)/src -lmastik -lm
 
 # Project Files
 # Assuming you moved your code into a 'src' folder inside 'stable'
-SRCS = src/main.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c
+SRCS = src/main.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c src/lazy_map.c
 OBJS = $(SRCS:.c=.o)
 
 # Executable Name
@@ -28,13 +28,13 @@ TARGET = MastikElite
 # Coverage validator (cross-process P+P against the JS lazy mapping).
 # Reuses every non-main object (utils/tests/mastikElite/murmur3) + its own main.
 COV_TARGET = CoverageValidator
-COV_SRCS = src/coverage_validator.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c
+COV_SRCS = src/coverage_validator.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c src/lazy_map.c
 COV_OBJS = $(COV_SRCS:.c=.o)
 
 # Fingerprint orchestrator (real-browser Stage 3: drives Chrome JS sampling + stress-ng).
 # Reuses the same non-main objects + its own main.
 FP_TARGET = FingerprintOrchestrator
-FP_SRCS = src/fingerprint_orchestrator.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c
+FP_SRCS = src/fingerprint_orchestrator.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c src/lazy_map.c
 FP_OBJS = $(FP_SRCS:.c=.o)
 
 # Build Rules

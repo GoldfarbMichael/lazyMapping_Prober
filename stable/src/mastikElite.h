@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
+#include <stdint.h>
+#include "lazy_map.h"   // LazyMap (JS-style lazy-map victim, timer_mode==2)
 #define MAX_NUM_CLUSTERS 64
 #define TST_SEC 2
 #define SST_SEC 8000e-6
@@ -50,6 +52,8 @@ int load_mapping_and_eSetsFrom_BIN_file(l3pp_t *l3, void ***e_sets, const char *
 Clusters_t* eviction_sets_to_Clusters(void ***e_sets, int num_sets, int NoC);
 
 void get_spatioTemporal_memoryGram(Clusters_t *Clusters, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename);
+
+void get_spatioTemporal_memoryGram_ChromeMock_jsmap(LazyMap *m, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename);
 
 int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, char *output_dir,const char *backing_file, const char *BIN_file, int timer_mode);
 

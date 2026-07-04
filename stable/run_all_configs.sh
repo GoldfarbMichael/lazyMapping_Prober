@@ -29,8 +29,9 @@ trap cleanup SIGINT SIGTERM
 # ============================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BATCH_RUNNER="$SCRIPT_DIR/batch_runner.sh"
-TIMER_MODE="-c"  # Chrome timer
+# TIMER_MODE="-c"  # Chrome timer (Mastik loaded-e_set clusters)
 # TIMER_MODE="-n"  # native timer
+TIMER_MODE="-j"  # Chrome timer + JS-style lazy-map victim (data/chrome_clock_jsmap/...)
 COOLDOWN_SECS=60
 LOG_DIR="$SCRIPT_DIR/batch_logs"
 
@@ -57,7 +58,7 @@ echo ""
 echo "Configuration:"
 echo "  Script Directory:  $SCRIPT_DIR"
 echo "  Batch Runner:      $BATCH_RUNNER"
-echo "  Timer Mode:        $TIMER_MODE (Chrome Mock)"
+echo "  Timer Mode:        $TIMER_MODE"
 echo "  Cooldown:          $COOLDOWN_SECS seconds"
 echo "  Log Directory:     $LOG_DIR"
 echo ""

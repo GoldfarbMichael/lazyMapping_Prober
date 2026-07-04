@@ -40,6 +40,7 @@
 #include <mastik/impl.h>  // LNEXT (pointer-chase macro)
 #include "utils.h"        // virt_to_phys, load_physical_mapping, maccessMy
 #include "mastikElite.h"  // pin_to_core, load_mapping_and_eSetsFrom_BIN_file, eviction_sets_to_Clusters
+#include "lazy_map.h"     // LazyMap, build_lazy_mapping, free_lazy_mapping, sweep_lazy_once
 
 #define HUGEPAGE_PATH_A "/dev/hugepages/map_A"
 #define MAPPING_FILE_A  "mapping_A.bin"
@@ -210,136 +211,21 @@ static uint16_t probe_set_native(l3pp_t l3, int setIdx, void *head,
 }
 
 // ---- JSMAP experiment: a C port of the JS main.js LazyMapping victim ----
-// Instead of loading a saved Mastik mapping (mapping_B) and clustering it, this builds
-// the victim exactly as the browser does: a fresh page-aligned mmap buffer partitioned
-// by translation-invariant bits 6-11, with per-bit-value shuffled pages. The mmap buffer
-// is a SEPARATE virtual allocation from map_A; contention still lands on l3A's physical
-// sets because the LLC is physically indexed and lazy clusters share bits 6-11.
-
-// JS geometry / constants (main.js). Hard-coded per-CPU, as in JS.
-#define JS_LLC_SETS       16384          // 2^14 (2048 sets/slice x 8 slices, i7-9700k)
-#define JS_LLC_WAYS       12             // associativity
-#define JS_BYTES_PER_LINE 64
-#define JS_BYTES_PER_PAGE 4096
-#define JS_ELEMS_PER_PAGE (JS_BYTES_PER_PAGE / 4)   // 1024 (uint32 elements per page)
-#define JS_ELEMS_PER_LINE (JS_BYTES_PER_LINE / 4)   // 16
-#define JS_LINES_PER_PAGE (JS_BYTES_PER_PAGE / JS_BYTES_PER_LINE)  // 64 (bit 6-11 values)
-
-typedef struct {
-    uint32_t *buf;        // mmap'd, page-aligned; node values are 32-bit ELEMENT indices
-    uint32_t *heads;      // per-cluster head element index
-    int      *nodeCounts; // lines per cluster
-    int       numClusters;
-    size_t    bytes;      // buffer size, for munmap
-} LazyMap;
-
-static uint32_t g_lazy_sink;  // observed after each sweep to defeat dead-code elimination
-
-// Fisher-Yates shuffle of an int array (JS main.js shuffle()).
-static void shuffle_int(int *a, int n) {
-    for (int i = n - 1; i > 0; i--) {
-        int j = rand() % (i + 1);
-        int tmp = a[i]; a[i] = a[j]; a[j] = tmp;
-    }
-}
-
-// Port of JS LazyMapping.build(). When shufflePages is 0 the pages are used in order
-// (strided; prefetch A/B). Returns 0 on success.
-static int build_lazy_mapping(LazyMap *m, int noc, int llcSets, int llcWays, int shufflePages) {
-    memset(m, 0, sizeof(*m));
-    m->numClusters = noc;
-    m->bytes = (size_t)llcSets * llcWays * JS_BYTES_PER_LINE;
-
-    m->buf = mmap(NULL, m->bytes, PROT_READ | PROT_WRITE,
-                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (m->buf == MAP_FAILED) { perror("mmap lazy buffer"); m->buf = NULL; return 1; }
-
-    const int numPages         = (int)(m->bytes / JS_BYTES_PER_PAGE);
-    const int shiftRight        = 12 - (int)round(log2((double)noc));
-    const int andTarget         = noc - 1;
-    const int evSetsPerBitValue = numPages / llcWays;
-    const int nodesPerCluster   = (llcSets * llcWays) / noc;
-
-    m->heads      = malloc((size_t)noc * sizeof(uint32_t));
-    m->nodeCounts = malloc((size_t)noc * sizeof(int));
-    uint32_t **clusterNodes = malloc((size_t)noc * sizeof(uint32_t *));
-    int *fill = calloc((size_t)noc, sizeof(int));
-    int *pages = malloc((size_t)numPages * sizeof(int));
-    if (!m->heads || !m->nodeCounts || !clusterNodes || !fill || !pages) {
-        perror("malloc lazy mapping"); return 1;
-    }
-    for (int c = 0; c < noc; c++)
-        clusterNodes[c] = malloc((size_t)nodesPerCluster * sizeof(uint32_t));
-
-    for (int v = 0; v < JS_LINES_PER_PAGE; v++) {
-        int cluster = ((v * JS_BYTES_PER_LINE) >> shiftRight) & andTarget;
-
-        for (int p = 0; p < numPages; p++) pages[p] = p;
-        if (shufflePages) shuffle_int(pages, numPages);
-
-        for (int s = 0; s < evSetsPerBitValue; s++) {
-            for (int w = 0; w < llcWays; w++) {
-                int page = pages[s * llcWays + w];
-                uint32_t node = (uint32_t)(page * JS_ELEMS_PER_PAGE + v * JS_ELEMS_PER_LINE);
-                clusterNodes[cluster][fill[cluster]++] = node;
-            }
-        }
-    }
-
-    for (int c = 0; c < noc; c++) {
-        int len = fill[c];
-        for (int i = 0; i < len; i++)
-            m->buf[clusterNodes[c][i]] = clusterNodes[c][(i + 1) % len];  // circular link
-        m->heads[c] = clusterNodes[c][0];
-        m->nodeCounts[c] = len;
-        free(clusterNodes[c]);
-    }
-    free(clusterNodes); free(fill); free(pages);
-    return 0;
-}
-
-static void free_lazy_mapping(LazyMap *m) {
-    if (m->buf && m->buf != MAP_FAILED) munmap(m->buf, m->bytes);
-    free(m->heads); free(m->nodeCounts);
-    m->buf = NULL; m->heads = NULL; m->nodeCounts = NULL;
-}
-
-// Sweep cluster c's circular list (JS main.js hammerCluster) with two replacement-policy
-// experiment knobs (both default to the plain JS behavior at 1):
-//   accessesPerLine - how many words of each node's 64B line to touch per visit. Offset 0
-//                     is the chase link; offsets 1..accessesPerLine-1 are extra accesses to
-//                     the SAME line. Tests the adaptive-insertion hypothesis (Gruss'16,
-//                     Qureshi'07, Jaleel'10): repeatedly hitting a line to raise its
-//                     insertion/retention probability so the attacker line actually seats
-//                     and evicts the victim.
-//   passes          - full traversals of the cluster per probe (interleaved re-access:
-//                     each line is revisited only after the rest of the cluster is touched).
-static void sweep_lazy_once(const LazyMap *m, int c, int passes, int accessesPerLine) {
-    const uint32_t *buf = m->buf;
-    int n = m->nodeCounts[c];
-    uint32_t curr = m->heads[c];
-    uint64_t sink = 0;
-    for (int p = 0; p < passes; p++) {
-        for (int i = 0; i < n; i++) {
-            uint32_t next = buf[curr];               // offset 0 = probe line + chase link
-            for (int r = 1; r < accessesPerLine; r++)
-                sink += buf[curr + r];               // extra accesses to the SAME 64B line
-            curr = next;
-        }
-    }
-    g_lazy_sink = curr + (uint32_t)sink;
-}
+// The LazyMap struct, build_lazy_mapping(), free_lazy_mapping() and sweep_lazy_once()
+// now live in the shared src/lazy_map.{c,h} module (also used by MastikElite's
+// timer_mode==2 stress-ng fingerprinting), so there is a single copy of the JS-faithful
+// lazy-map construction. See lazy_map.h for the JS geometry constants and the struct.
 
 // Prime ONE set (mapping A) -> sweep JS lazy cluster c -> probe. Mirrors
 // probe_set_native but sweeps the mmap JS-faithful victim instead of a Clusters_t.
-static uint16_t probe_set_jsmap(l3pp_t l3, int setIdx, void *head,
-                                const LazyMap *m, int c, int passes, int accessesPerLine) {
+static uint16_t probe_set_jsmap(l3pp_t l3, int setIdx, void *head, const LazyMap *m, int c,
+                                int passes, int accessesPerLine, int sameAddr) {
     uint16_t res[4];
     l3_unmonitorall(l3);
     l3_monitor_manual(l3, setIdx, head);
-    l3_bprobecount(l3, res);                        // prime (backward warm)
-    sweep_lazy_once(m, c, passes, accessesPerLine); // victim sweeps cluster c
-    l3_probecount(l3, res);                         // measure (forward); res[0] = misses
+    l3_bprobecount(l3, res);                                    // prime (backward warm)
+    sweep_lazy_once(m, c, passes, accessesPerLine, sameAddr);   // victim sweeps cluster c
+    l3_probecount(l3, res);                                     // measure; res[0] = misses
     return res[0];
 }
 
@@ -642,7 +528,7 @@ static int run_native_experiment(int noc, int iterIdx, int shuffle) {
 // native victim is byte-for-byte the same construction the browser sweeps.
 // -----------------------------------------------------------------------------
 static int run_native_jsmap_experiment(int noc, int iterIdx, int shuffle,
-                                       int passes, int accessesPerLine) {
+                                       int passes, int accessesPerLine, int sameAddr) {
     pin_to_core(PROBER_CORE);
     // Deterministic per-iteration page shuffle (reproducible across reruns of the same iter).
     if (shuffle) srand((unsigned)(iterIdx + 1));
@@ -673,8 +559,9 @@ static int run_native_jsmap_experiment(int noc, int iterIdx, int shuffle,
         fprintf(stderr, "Failed to build JS lazy mapping\n");
         return 1;
     }
-    printf("[cov-jsmap] JS victim built (mmap %zu MB, pages %s, passes=%d, accesses/line=%d).\n",
-           map.bytes / (1024 * 1024), shuffle ? "shuffled" : "in-order", passes, accessesPerLine);
+    printf("[cov-jsmap] JS victim built (mmap %zu MB, pages %s, passes=%d, accesses/line=%d, mode=%s).\n",
+           map.bytes / (1024 * 1024), shuffle ? "shuffled" : "in-order", passes, accessesPerLine,
+           sameAddr ? "same-addr" : "words");
 
     int setsPerGroup = numSets / noc;
     printf("[cov-jsmap] numSets=%d assoc=%d NoC=%d iter=%d setsPerGroup=%d\n",
@@ -693,7 +580,7 @@ static int run_native_jsmap_experiment(int noc, int iterIdx, int shuffle,
     for (int c = 0; c < noc; c++) {
         uint16_t *row = &matrix[(size_t)c * numSets];
         for (int i = 0; i < numSets; i++) {
-            row[i] = e_setsA[i] ? probe_set_jsmap(l3A, i, e_setsA[i], &map, c, passes, accessesPerLine) : 0;
+            row[i] = e_setsA[i] ? probe_set_jsmap(l3A, i, e_setsA[i], &map, c, passes, accessesPerLine, sameAddr) : 0;
         }
         int g = get_active_group(row, setsPerGroup, numSets, assoc);
         printf("[cov-jsmap] cluster %d -> dominant group %d\n", c, g);
@@ -707,7 +594,7 @@ static int run_native_jsmap_experiment(int noc, int iterIdx, int shuffle,
     uint64_t sweepCycles = UINT64_MAX;
     for (int r = 0; r < 5; r++) {
         uint64_t t0 = rdtscp64();
-        sweep_lazy_once(&map, 0, passes, accessesPerLine);
+        sweep_lazy_once(&map, 0, passes, accessesPerLine, sameAddr);
         uint64_t dt = rdtscp64() - t0;
         if (dt < sweepCycles) sweepCycles = dt;
     }
@@ -722,11 +609,13 @@ static int run_native_jsmap_experiment(int noc, int iterIdx, int shuffle,
     // 5. Write outputs. Every jsmap run gets its OWN (passes, accesses/line) tree so it
     // never collides with the mapping_B `native shuffle` tree (also data/coverage/native_shuffled)
     // or with a different knob combo: e.g. native_shuffled_p1a1, native_shuffled_p2a4.
-    //   shuffle=1 -> data/coverage/native_shuffled_p{P}a{A}
-    //   shuffle=0 -> data/coverage/native_jsmap_p{P}a{A}
+    //   shuffle=1 -> data/coverage/native_shuffled_p{P}a{A}[_same]
+    //   shuffle=0 -> data/coverage/native_jsmap_p{P}a{A}[_same]
+    // The "_same" suffix marks the same-exact-address access pattern (vs different words).
     const char *root = shuffle ? DATA_DIR "/native_shuffled" : DATA_DIR "/native_jsmap";
     char baseDir[128];
-    snprintf(baseDir, sizeof(baseDir), "%s_p%da%d", root, passes, accessesPerLine);
+    snprintf(baseDir, sizeof(baseDir), "%s_p%da%d%s", root, passes, accessesPerLine,
+             sameAddr ? "_same" : "");
     char dir[256], missPath[300];
     snprintf(dir, sizeof(dir), "%s/NoC%02d", baseDir, noc);
     mkdir_p(dir);
@@ -780,8 +669,9 @@ int main(int argc, char **argv) {
     //   jsmap  : argv[4] = "shuffle" for the JS-faithful (page-shuffled) victim ->
     //            data/coverage/native_shuffled; default (unshuffled pages) ->
     //            data/coverage/native_jsmap. argv[5]=passes (full sweeps/probe; default 1),
-    //            argv[6]=accesses per line (same-line touches/node; default 3). Every jsmap
-    //            run writes its own _p{P}a{A} tree (e.g. native_shuffled_p1a1).
+    //            argv[6]=accesses per line (default 3), argv[7]="same" to repeat the EXACT
+    //            same address (vs different words; default "words"). Every jsmap run writes
+    //            its own _p{P}a{A}[_same] tree (e.g. native_shuffled_p1a3_same).
     int noc     = (argc > 1) ? atoi(argv[1]) : DEFAULT_NOC;
     int iterIdx = (argc > 2) ? atoi(argv[2]) : 0;
     const char *mode = (argc > 3) ? argv[3] : "browser";
@@ -796,13 +686,16 @@ int main(int argc, char **argv) {
     }
     if (strcmp(mode, "jsmap") == 0) {
         int shuffle = (argc > 4) && strcmp(argv[4], "shuffle") == 0;
-        // Replacement-policy knobs: argv[5]=passes, argv[6]=accesses per line (both default 1).
+        // Replacement-policy knobs: argv[5]=passes, argv[6]=accesses/line, argv[7]=pattern
+        // ("same" = repeat the exact same address; anything else = different words in the line).
         int passes          = (argc > 5) ? atoi(argv[5]) : 1;
         int accessesPerLine = (argc > 6) ? atoi(argv[6]) : 3;
+        int sameAddr        = (argc > 7) && strcmp(argv[7], "same") == 0;
         if (passes < 1) passes = 1;
         if (accessesPerLine < 1) accessesPerLine = 1;
-        if (accessesPerLine > JS_ELEMS_PER_LINE) accessesPerLine = JS_ELEMS_PER_LINE;  // 16 words/line
-        return run_native_jsmap_experiment(noc, iterIdx, shuffle, passes, accessesPerLine);
+        // The 16-word cap only applies to the "words" pattern; same-address can repeat freely.
+        if (!sameAddr && accessesPerLine > JS_ELEMS_PER_LINE) accessesPerLine = JS_ELEMS_PER_LINE;
+        return run_native_jsmap_experiment(noc, iterIdx, shuffle, passes, accessesPerLine, sameAddr);
     }
     if (strcmp(mode, "browser") != 0) {
         fprintf(stderr, "Unknown mode '%s' (use 'browser', 'native', or 'jsmap')\n", mode);

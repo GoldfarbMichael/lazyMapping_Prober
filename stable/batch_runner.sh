@@ -8,10 +8,18 @@ trap 'sudo pkill -9 stress-ng 2>/dev/null; sudo pkill -9 MastikElite 2>/dev/null
 PROGRAM="./MastikElite"
 TIMER_MODE="-n"  # Default: -n (native), can be -c (chrome)
 CONFIG_DIR=""    # Will be set from command-line argument
-BATCH_SIZE=1
-TOTAL_ITERATIONS=200
+BATCH_SIZE=50
+TOTAL_ITERATIONS=50
 COOLDOWN_SECS=10
 OUTPUT_DIR="batch_logs"
+
+# --- Per-run timeout is DERIVED from the workload (below), never a fixed value, so a
+# healthy long run is never killed while a genuinely hung process is still recovered.
+# These mirror the C program's inner cost in runStressNG_batches():
+NUM_STRESSORS=38       # entries in stress_battery[] (mastikElite.c) — keep in sync
+PER_SAMPLE_SECS=4      # ~TST(2s) + per-sample cooldown(1s) + steady/overhead, rounded up
+INTER_ROUND_SECS=8     # sleep() between rounds in runStressNG_batches
+TIMEOUT_SAFETY_PCT=140 # allow 140% of the estimate (40% headroom)
 
 # ============================================
 # Parse command-line arguments
@@ -45,6 +53,10 @@ elif [[ "$1" == "-n" ]]; then
     TIMER_MODE="-n"
     echo "Timer Mode set to: Native rdtscp64 (-n)"
     shift  # Move to next argument
+elif [[ "$1" == "-j" ]]; then
+    TIMER_MODE="-j"
+    echo "Timer Mode set to: Chrome Mock + JS-style lazy map (-j)"
+    shift  # Move to next argument
 elif [[ "$1" == "-h" || "$1" == "--help" ]]; then
     echo "Usage: $0 [-c|-n] CONFIG_DIR"
     echo ""
@@ -74,7 +86,11 @@ echo "Configuration Directory: $CONFIG_DIR"
 # Create directories
 # ============================================
 mkdir -p "$OUTPUT_DIR"
-TIMER_SUBDIR=$([ "$TIMER_MODE" = "-c" ] && echo "chrome_clock" || echo "native_clock")
+case "$TIMER_MODE" in
+    -c) TIMER_SUBDIR="chrome_clock" ;;
+    -j) TIMER_SUBDIR="chrome_clock_jsmap" ;;
+    *)  TIMER_SUBDIR="native_clock" ;;
+esac
 mkdir -p "data/$TIMER_SUBDIR/$CONFIG_DIR"  # Ensure config-specific data directory exists
 
 # ============================================
@@ -116,7 +132,7 @@ NUM_BATCHES=$(( (TOTAL_ITERATIONS + BATCH_SIZE - 1) / BATCH_SIZE ))
 echo ""
 echo "🚀 BATCH EXECUTION SCHEDULER"
 print_separator
-echo "Timer Mode:      $TIMER_MODE ($([ "$TIMER_MODE" == "-c" ] && echo "Chrome Mock" || echo "Native rdtscp64"))"
+echo "Timer Mode:      $TIMER_MODE ($TIMER_SUBDIR)"
 echo "Config Directory: $CONFIG_DIR"
 echo "Total Iterations: $TOTAL_ITERATIONS"
 echo "Batch Size:      $BATCH_SIZE"
@@ -128,7 +144,7 @@ echo ""
 SUCCESS_COUNT=0
 FAIL_COUNT=0
 
-for ((batch=50; batch<=NUM_BATCHES; batch++)); do
+for ((batch=1; batch<=NUM_BATCHES; batch++)); do
     START_ITER=$(( (batch - 1) * BATCH_SIZE ))
     END_ITER=$(( START_ITER + BATCH_SIZE ))
     if [ $END_ITER -gt $TOTAL_ITERATIONS ]; then
@@ -138,28 +154,34 @@ for ((batch=50; batch<=NUM_BATCHES; batch++)); do
     ACTUAL_BATCH_SIZE=$(( END_ITER - START_ITER ))
     BATCH_LOG="$OUTPUT_DIR/batch_${batch}.log"
     sudo -v 2>/dev/null
-    
+
+    # Derive a generous timeout from the actual work this invocation performs:
+    #   ACTUAL_BATCH_SIZE rounds, each = NUM_STRESSORS samples + one inter-round cooldown.
+    EST_SECS=$(( ACTUAL_BATCH_SIZE * (NUM_STRESSORS * PER_SAMPLE_SECS + INTER_ROUND_SECS) ))
+    TIMEOUT_SECS=$(( EST_SECS * TIMEOUT_SAFETY_PCT / 100 ))
+
     echo ""
     echo "📊 [Batch $batch/$NUM_BATCHES] Iterations $START_ITER-$((END_ITER-1))"
     echo "   Start Time: $(date '+%Y-%m-%d %H:%M:%S')"
     echo "   System Health: $(check_system_health)"
+    echo "   Estimated runtime: ~${EST_SECS}s | Kill timeout: ${TIMEOUT_SECS}s"
     echo "   Running: sudo $PROGRAM $TIMER_MODE $START_ITER $ACTUAL_BATCH_SIZE $CONFIG_DIR"
     print_separator
-    
-    # Run the program with timeout (6:30 min = 390 seconds)
+
+    # Run the program with a workload-derived timeout (hang recovery only; never trims a healthy run).
     BATCH_SUCCESS=false
     RETRY_COUNT=0
     MAX_RETRIES=3
-    
+
     while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-        sudo timeout 450 $PROGRAM $TIMER_MODE $START_ITER $ACTUAL_BATCH_SIZE $CONFIG_DIR >> "$BATCH_LOG" 2>&1
+        sudo timeout "$TIMEOUT_SECS" $PROGRAM $TIMER_MODE $START_ITER $ACTUAL_BATCH_SIZE $CONFIG_DIR >> "$BATCH_LOG" 2>&1
         EXIT_CODE=$?
-        
+
         if [ $EXIT_CODE -eq 124 ]; then
             # Timeout occurred (exit code 124 is timeout)
             ((RETRY_COUNT++))
-            echo "[TIMEOUT] Batch $batch timed out after 6:30 min - restarting iteration ($RETRY_COUNT/$MAX_RETRIES)"
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] TIMEOUT: Iteration $START_ITER-$((END_ITER-1)) timed out (attempt $RETRY_COUNT)" >> "$BATCH_LOG"
+            echo "[TIMEOUT] Batch $batch exceeded ${TIMEOUT_SECS}s (est ~${EST_SECS}s) - restarting iteration ($RETRY_COUNT/$MAX_RETRIES)"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] TIMEOUT: Iteration $START_ITER-$((END_ITER-1)) exceeded ${TIMEOUT_SECS}s (attempt $RETRY_COUNT)" >> "$BATCH_LOG"
             sudo pkill -9 stress-ng 2>/dev/null
             
             if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
@@ -205,7 +227,7 @@ echo ""
 print_separator
 echo "✨ EXECUTION COMPLETE"
 print_separator
-echo "Timer Mode:         $TIMER_MODE ($([ "$TIMER_MODE" == "-c" ] && echo "Chrome Mock" || echo "Native rdtscp64"))"
+echo "Timer Mode:         $TIMER_MODE ($TIMER_SUBDIR)"
 echo "Config Directory:   $CONFIG_DIR"
 echo "Successful Batches: $SUCCESS_COUNT / $NUM_BATCHES"
 echo "Failed Batches:     $FAIL_COUNT / $NUM_BATCHES"

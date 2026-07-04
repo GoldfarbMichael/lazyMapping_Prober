@@ -18,6 +18,7 @@
 
 #include "utils.h"
 #include "mastikElite.h"
+#include "lazy_map.h"
 
 #define ACCESSES_TILL_TIMER_POLL 90
 // Define your massive test battery here. 
@@ -586,6 +587,106 @@ void get_spatioTemporal_memoryGram_ChromeMock(Clusters_t *Clusters, int NoC, uin
 
 
 
+/**
+ * Chrome-mock-clock spatio-temporal sampler for the JS-STYLE lazy-map victim (timer_mode==2).
+ *
+ * Structurally identical to get_spatioTemporal_memoryGram_ChromeMock (same SST_us window,
+ * same ACCESSES_TILL_TIMER_POLL batched chrome_mock_timer polling, same CSV writer), but the
+ * inner sweep is the JS 32-bit index chase over the LazyMap's mmap buffer (curr = buf[curr])
+ * instead of the Mastik pointer-chase (maccessMy + LNEXT). This is the additive victim source
+ * for the A/B against the Mastik-e_set path; the e_set sampler above is left untouched.
+ *
+ * @param m     Pre-built LazyMap (build_lazy_mapping); m->heads[c] = head element index of cluster c.
+ * @param NoC   Number of clusters.
+ * @param TST_cycles Total sampling time (CPU cycles); sets total time slots.
+ * @param SST_cycles Single-cluster sweep window (CPU cycles); converted to the mock-clock us window.
+ * @param matrix Pre-allocated, zero-initialized uint32_t[total_slots * NoC]; matrix[s*NoC+c] = count.
+ * @param filename Output CSV path.
+ */
+void get_spatioTemporal_memoryGram_ChromeMock_jsmap(LazyMap *m, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename){
+    if (!m || !m->buf) {
+        fprintf(stderr, "FATAL: LazyMap is NULL/unbuilt.\n");
+        return;
+    }
+
+    if (!matrix) {
+        fprintf(stderr, "FATAL: matrix is NULL. Must be pre-allocated and initialized to 0.\n");
+        return;
+    }
+
+    // 1. Calculate matrix dimensions
+    uint64_t total_samples_per_cluster = TST_cycles / (NoC * SST_cycles);
+    uint64_t SST_us = (SST_cycles * 1000000) / g_tsc_freq_hz;  // Convert SST_cycles to microseconds for mock timer
+
+    // 2. Spatio-Temporal Sampling Phase (Strictly NO I/O here)
+    for (uint64_t s = 0; s < total_samples_per_cluster; s++) {
+        for (int c = 0; c < NoC; c++) {
+
+            const uint32_t *buf = m->buf;
+            register uint32_t curr = m->heads[c];
+            register uint32_t count = 0;
+
+            // Set the timer constraint for this cluster
+            uint64_t start_cluster = chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed);
+            uint64_t end_cluster = start_cluster + SST_us;
+
+            int check_count = 0;
+
+            while (1) {
+                curr = buf[curr];   // JS index chase: the access AND the next-node link
+                count++;
+
+                if (++check_count == ACCESSES_TILL_TIMER_POLL) {
+                    if (chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed) >= end_cluster) {
+                        break;
+                    }
+                    check_count = 0;
+                }
+            }
+
+            // Store the access count
+            matrix[s * NoC + c] = count;
+        }
+    }
+
+    // 3. I/O Phase (Post-Measurement)
+    FILE *fp = fopen(filename, "w");
+    if (!fp) {
+        fprintf(stderr, "FATAL: Could not open output file %s\n", filename);
+        return;
+    }
+
+    // Write CSV Header
+    for (int g = 0; g < NoC; g++) {
+        fprintf(fp, "G%d%s", g, (g == NoC - 1) ? "" : ",");
+    }
+    fprintf(fp, "\n");
+
+    // Write Matrix Data
+    for (uint64_t t = 0; t < total_samples_per_cluster; t++) {
+        for (int g = 0; g < NoC; g++) {
+            fprintf(fp, "%u%s", matrix[t * NoC + g], (g == NoC - 1) ? "" : ",");
+        }
+        fprintf(fp, "\n");
+    }
+
+    fclose(fp);
+    printf("Successfully wrote %lu samples for %d clusters to %s\n", total_samples_per_cluster, NoC, filename);
+}
+
+
+// Output-tree subdir for a timer_mode: 0=native clock, 1=Chrome mock clock (Mastik e_sets),
+// 2=Chrome mock clock (JS-style lazy map). Keeps the JS-style A/B runs in a distinct tree so
+// the existing Mastik-e_set data (data/chrome_clock/...) is never touched.
+static const char* timer_mode_subdir(int timer_mode) {
+    switch (timer_mode) {
+        case 1:  return "chrome_clock";
+        case 2:  return "chrome_clock_jsmap";
+        default: return "native_clock";
+    }
+}
+
+
 int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, char *output_dir, const char *backing_file, const char *BIN_file, int timer_mode) {
     l3pp_t l3 = NULL;
     void **e_sets = NULL;
@@ -601,8 +702,10 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
     printf("TST_cycles: %lu, g_tsc_freq_hz: %lu\n", TST_cycles, g_tsc_freq_hz);
     uint64_t SST_cycles = 200*1.5*setsPerCluster*l3_getAssociativity(l3);
     
-    // For chrome mock timer (mode 1), enforce minimum 500us window by adjusting SST_cycles
-    if (timer_mode == 1) {
+    // For chrome mock timer (mode 1 Mastik e_sets, mode 2 JS-style lazy map), enforce
+    // minimum 500us window by adjusting SST_cycles. SST sizing is identical for both victims
+    // (setsPerCluster*assoc == the lazy map's nodes-per-cluster), so the A/B stays comparable.
+    if (timer_mode == 1 || timer_mode == 2) {
         // SST_cycles = 1144*setsPerCluster*l3_getAssociativity(l3);
         SST_cycles = 2288*setsPerCluster*l3_getAssociativity(l3);
         uint64_t min_SST_cycles_for_500us = (500 * g_tsc_freq_hz) / 1000000;
@@ -623,33 +726,57 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
     pin_to_core(0);    
 
 
-    Clusters_t *Clusters = eviction_sets_to_Clusters(&e_sets, l3_getSets(l3), NoC);
-    if (!Clusters) {
-    fprintf(stderr, "Failed to create clusters\n");
-    return 1;
+    // Build the victim source. Default (timer_mode 0/1) = the Mastik loaded-eviction-set
+    // clusters (unchanged). timer_mode 2 = the JS-faithful lazy map (shuffled pages), built
+    // in a fresh mmap buffer exactly as the browser does. The loaded e_sets are unused for
+    // mode 2, but l3 is still used above for identical TST/SST sizing.
+    Clusters_t *Clusters = NULL;
+    LazyMap jmap;
+    memset(&jmap, 0, sizeof(jmap));
+    if (timer_mode == 2) {
+        if (build_lazy_mapping(&jmap, NoC, l3_getSets(l3), l3_getAssociativity(l3), /*shufflePages=*/1)) {
+            fprintf(stderr, "Failed to build JS lazy mapping\n");
+            l3_release(l3);
+            return 1;
+        }
+        printf("Built JS-style lazy map victim (mmap %zu MB, %d clusters, shuffled pages)\n",
+               jmap.bytes / (1024 * 1024), NoC);
+    } else {
+        Clusters = eviction_sets_to_Clusters(&e_sets, l3_getSets(l3), NoC);
+        if (!Clusters) {
+            fprintf(stderr, "Failed to create clusters\n");
+            l3_release(l3);
+            return 1;
+        }
     }
-    
+
     // Pre-allocate and initialize matrix to 0
     uint32_t *matrix = (uint32_t *)calloc(totalSweeps_forCluster * NoC, sizeof(uint32_t));
     if (!matrix) {
         fprintf(stderr, "FATAL: Matrix allocation failed.\n");
-        free_Clusters(Clusters);
+        if (timer_mode == 2) free_lazy_mapping(&jmap); else free_Clusters(Clusters);
         l3_release(l3);
         return 1;
     }
     printf("Matrix allocated and initialized to 0\n");
 
-    for (size_t s_idx = 0; s_idx < NUM_STRESSORS; s_idx++) {
+    // Loop order: OUTER over iterations (rounds), INNER over stressors. Each round samples
+    // every stressor exactly once before advancing to the next round, so slow machine-state
+    // drift (thermal, background load) is decorrelated from stressor identity instead of being
+    // baked into a block of consecutive same-stressor samples (which would fingerprint the
+    // machine's temporal state, not the stressor). Output filenames are unchanged
+    // (data/<clock>/<config>/<stressor>/<iteration>.csv); only the temporal collection order differs.
+    for (int iteration = start_iteration; iteration < start_iteration + batch_size; iteration++) {
         printf("\n==================================================\n");
-        printf("[*] Starting Battery: %s\n", stress_battery[s_idx].stressor_name);
+        printf("[*] Round: iteration %d (sampling all %zu stressors once)\n", iteration, (size_t)NUM_STRESSORS);
         printf("==================================================\n");
 
-        for (int iteration = start_iteration; iteration < start_iteration + batch_size; iteration++) {
-            
+        for (size_t s_idx = 0; s_idx < NUM_STRESSORS; s_idx++) {
+
             // 1. DYNAMIC FILE NAMING
             char dynamic_output_path[256];
-            snprintf(dynamic_output_path, sizeof(dynamic_output_path), "data/%s/%s/%s/%d.csv", 
-                    (timer_mode == 1) ? "chrome_clock" : "native_clock",
+            snprintf(dynamic_output_path, sizeof(dynamic_output_path), "data/%s/%s/%s/%d.csv",
+                    timer_mode_subdir(timer_mode),
                     output_dir, stress_battery[s_idx].stressor_name, iteration);
 
             // Ensure output directory exists
@@ -657,8 +784,9 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
             snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p $(dirname %s)", dynamic_output_path);
             system(mkdir_cmd);
 
-            printf("  -> [Iter %d/%d] Collecting %s...\n", 
-                iteration - start_iteration + 1, batch_size, dynamic_output_path);
+            printf("  -> [Round %d/%d | %s] Collecting %s...\n",
+                iteration - start_iteration + 1, batch_size,
+                stress_battery[s_idx].stressor_name, dynamic_output_path);
 
             // 2. FORK THE NOISE INJECTOR
             pid_t pid = fork();
@@ -669,9 +797,9 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
 
             if (pid == 0) {
                 // CHILD PROCESS: Pin to Core 1 and execute stressor
-                pin_to_core(1); 
+                pin_to_core(1);
                 execvp(stress_battery[s_idx].exec_args[0], stress_battery[s_idx].exec_args);
-                perror("FATAL: execvp failed in child"); 
+                perror("FATAL: execvp failed in child");
                 return 1;
             }
 
@@ -686,11 +814,14 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
                 case 0:  // Use rdtscp64()
                     get_spatioTemporal_memoryGram(Clusters, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path);
                     break;
-                case 1:  // Use chrome_mock_timer()
+                case 1:  // Use chrome_mock_timer() with Mastik loaded-e_set clusters
                     get_spatioTemporal_memoryGram_ChromeMock(Clusters, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path);
                     break;
+                case 2:  // Use chrome_mock_timer() with the JS-style lazy-map victim
+                    get_spatioTemporal_memoryGram_ChromeMock_jsmap(&jmap, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path);
+                    break;
                 default:
-                    fprintf(stderr, "ERROR: Unknown timer_mode %d. Use 0 (rdtscp64) or 1 (chrome_mock_timer)\n", timer_mode);
+                    fprintf(stderr, "ERROR: Unknown timer_mode %d. Use 0 (rdtscp64), 1 (chrome mock), or 2 (chrome mock JS lazy map)\n", timer_mode);
                     kill(pid, SIGKILL);
                     waitpid(pid, NULL, 0);
                     return 1;
@@ -708,11 +839,19 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
             // Zero out the matrix memory for the next iteration to prevent logical bleeding
             memset(matrix, 0, totalSweeps_forCluster * NoC * sizeof(uint32_t));
         }
+
+        // Inter-round cooldown: let package temperature settle toward baseline so thermal
+        // drift doesn't accumulate across rounds (cheap: once per round, not per sample).
+        if (iteration + 1 < start_iteration + batch_size) {
+            printf("[COOLDOWN] Inter-round cooldown 8s...\n");
+            sleep(8);
+        }
+        
     }
     // FREE resources at the end of this config's iteration
     free(matrix);
-    free_Clusters(Clusters);
-    printf("[INFO] Data collection complete, Matrix and Clusters freed.\n");
+    if (timer_mode == 2) free_lazy_mapping(&jmap); else free_Clusters(Clusters);
+    printf("[INFO] Data collection complete, Matrix and victim freed.\n");
     
     return 0;
 }

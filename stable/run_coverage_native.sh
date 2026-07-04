@@ -17,9 +17,11 @@
 # native writes data/coverage/native_shuffled/ (the mapping_B victim).
 # jsmap ALWAYS writes its own knob-tagged tree (never collides with native_shuffled):
 #   data/coverage/native_shuffled_p{PASSES}a{ACCESSES}/NoC{nn}/{iter}.csv
-# Tune the knobs (jsmap only) via env vars, defaults JSMAP_PASSES=1, JSMAP_ACCESSES=3:
-#   JSMAP_ACCESSES=1 ./run_coverage_native.sh 2 jsmap   -> ..._p1a1/
-#   JSMAP_ACCESSES=4 ./run_coverage_native.sh 2 jsmap   -> ..._p1a4/
+# Tune the knobs (jsmap only) via env vars, defaults JSMAP_PASSES=1, JSMAP_ACCESSES=3,
+# JSMAP_SAME=0 (0=different words in the line, 1=repeat the EXACT same address):
+#   JSMAP_ACCESSES=1 ./run_coverage_native.sh 2 jsmap                 -> ..._p1a1/
+#   JSMAP_ACCESSES=4 ./run_coverage_native.sh 2 jsmap                 -> ..._p1a4/
+#   JSMAP_SAME=1 JSMAP_ACCESSES=3 ./run_coverage_native.sh 2 jsmap    -> ..._p1a3_same/
 #
 # Run this AS YOUR NORMAL USER (not via sudo): it calls sudo itself for each
 # CoverageValidator run (which needs hugepages/pagemap). A run whose output already
@@ -55,10 +57,12 @@ if [ "$MODE" != "native" ] && [ "$MODE" != "jsmap" ]; then
     exit 2
 fi
 
-# jsmap replacement-policy knobs (env-overridable): full sweeps per probe, and
-# same-line accesses per node. Must mirror the C tool's dir naming (native_shuffled[_p{P}a{A}]).
+# jsmap replacement-policy knobs (env-overridable): full sweeps per probe, accesses per node,
+# and access pattern. JSMAP_SAME=1 repeats the EXACT same address (else different words in the
+# line). Must mirror the C tool's dir naming (native_shuffled_p{P}a{A}[_same]).
 JSMAP_PASSES="${JSMAP_PASSES:-1}"
 JSMAP_ACCESSES="${JSMAP_ACCESSES:-3}"
+JSMAP_SAME="${JSMAP_SAME:-0}"
 if [ "$MODE" = "jsmap" ]; then
     if ! [[ "$JSMAP_PASSES" =~ ^[0-9]+$ ]] || [ "$JSMAP_PASSES" -lt 1 ] \
     || ! [[ "$JSMAP_ACCESSES" =~ ^[0-9]+$ ]] || [ "$JSMAP_ACCESSES" -lt 1 ]; then
@@ -66,16 +70,18 @@ if [ "$MODE" = "jsmap" ]; then
         exit 2
     fi
 fi
+# Access pattern token forwarded to the C tool ("same" or "words"), and dir suffix.
+if [ "$JSMAP_SAME" = 1 ]; then JSMAP_PATTERN="same"; SAME_SUFFIX="_same"; else JSMAP_PATTERN="words"; SAME_SUFFIX=""; fi
 
 # Output tree, matching the C tool. native -> native_shuffled. jsmap ALWAYS gets its own
-# _p{P}a{A} tree (incl. p1a1) so it never collides with the mapping_B native_shuffled tree.
+# _p{P}a{A}[_same] tree (incl. p1a1) so it never collides with the mapping_B native_shuffled tree.
 if [ "$MODE" = "jsmap" ]; then
-    OUT_ROOT="data/coverage/native_shuffled_p${JSMAP_PASSES}a${JSMAP_ACCESSES}"
+    OUT_ROOT="data/coverage/native_shuffled_p${JSMAP_PASSES}a${JSMAP_ACCESSES}${SAME_SUFFIX}"
 else
     OUT_ROOT="data/coverage/native_shuffled"
 fi
 
-ALL_NOCS=(64 32 16 8 4 2)
+ALL_NOCS=(32 16 8 4 2 64)
 
 if [ -n "$ONLY_NOC" ]; then
     valid=0
@@ -114,7 +120,7 @@ if ! sudo -n true 2>/dev/null; then
 fi
 
 if [ "$MODE" = "jsmap" ]; then
-    echo "[native] mode: jsmap (shuffled, passes=$JSMAP_PASSES accesses/line=$JSMAP_ACCESSES)   NoCs: ${NOCS[*]}   iterations each: $ITERS"
+    echo "[native] mode: jsmap (shuffled, passes=$JSMAP_PASSES accesses/line=$JSMAP_ACCESSES pattern=$JSMAP_PATTERN)   NoCs: ${NOCS[*]}   iterations each: $ITERS"
 else
     echo "[native] mode: native (shuffled)   NoCs: ${NOCS[*]}   iterations each: $ITERS"
 fi
@@ -133,7 +139,7 @@ for noc in "${NOCS[@]}"; do
         echo "[native] NoC=$noc iter=$i   ($(date '+%Y-%m-%d %H:%M:%S'))"
         echo "============================================================"
         if [ "$MODE" = "jsmap" ]; then
-            run_cmd=(./CoverageValidator "$noc" "$i" jsmap shuffle "$JSMAP_PASSES" "$JSMAP_ACCESSES")
+            run_cmd=(./CoverageValidator "$noc" "$i" jsmap shuffle "$JSMAP_PASSES" "$JSMAP_ACCESSES" "$JSMAP_PATTERN")
         else
             run_cmd=(./CoverageValidator "$noc" "$i" native shuffle)
         fi
