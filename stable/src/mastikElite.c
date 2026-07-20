@@ -21,7 +21,18 @@
 #include "lazy_map.h"
 
 #define ACCESSES_TILL_TIMER_POLL 90
-// Define your massive test battery here. 
+// Fixed seed for the one-time cluster shuffle (shuffled-cluster fingerprinting A/B). Constant
+// so the fixed scattered layout is reproducible; edit it for the 2-3 seed robustness check.
+#define SHUFFLE_SEED 12345
+// Dynamic-K sweep (selected when the config label's K field == 0, e.g. "..._0K_..."): instead
+// of polling the mock clock every fixed K accesses, start each cluster quantum with a large
+// batch (~4 full cluster sweeps) and shrink the batch toward the deadline, polling only ~5-9
+// times per quantum. Mirrors JS sweepClusterDynamicK (JavaScript/main.js). Each chrome_mock_timer
+// call is rdtscp + Murmur3 + a 128-bit divide, so far fewer calls => much lower timer overhead.
+#define MIN_DYNAMIC_K 90          // floor: never batch fewer than this many accesses per poll
+// DYNAMIC_K_ALPHA = 0.5 damping on the remaining-time estimate, applied as integer "/ 2" below.
+
+// Define your massive test battery here.
 // Note: The array MUST be NULL-terminated for execvp.
 
 StressorConfig stress_battery[] = {
@@ -175,6 +186,31 @@ int parse_NoC_from_dirname(const char *dirname) {
     // Extract and convert
     int noc = (int)strtol(num_start, NULL, 10);
     return (noc > 0) ? noc : -1;
+}
+
+/**
+ * Parses the K field (accesses between mock-clock polls) from a config dir name.
+ *
+ * Format: {NoC}C_{TST}TST_{K}K_{cycles}cycles, e.g. "16C_2TST_90K_2288cycles" -> 90.
+ * K == 0 (e.g. "16C_2TST_0K_2288cycles") selects the dynamic-K sweep.
+ *
+ * @return the parsed K (>= 0), or -1 if the K field is absent/malformed. Note 0 is a
+ *         VALID result here (unlike parse_NoC), so callers must distinguish 0 from -1.
+ */
+int parse_K_from_dirname(const char *dirname) {
+    if (!dirname) return -1;
+
+    const char *k_pos = strstr(dirname, "K_");
+    if (!k_pos || k_pos == dirname) return -1;
+
+    const char *num_end = k_pos - 1;
+    while (num_end >= dirname && isdigit((unsigned char)*num_end)) {
+        num_end--;
+    }
+    const char *num_start = num_end + 1;
+    if (num_start >= k_pos) return -1;   // no digits before "K_"
+
+    return (int)strtol(num_start, NULL, 10);
 }
 
 int newBackedMapping_and_saveEsets_toBinFile(l3pp_t *l3, const char *backing_file, const char *BIN_file){
@@ -602,8 +638,11 @@ void get_spatioTemporal_memoryGram_ChromeMock(Clusters_t *Clusters, int NoC, uin
  * @param SST_cycles Single-cluster sweep window (CPU cycles); converted to the mock-clock us window.
  * @param matrix Pre-allocated, zero-initialized uint32_t[total_slots * NoC]; matrix[s*NoC+c] = count.
  * @param filename Output CSV path.
+ * @param K     Accesses between mock-clock polls. K > 0 = fixed cadence (poll every K accesses);
+ *              K == 0 = dynamic-K (adaptive batch, ~5-9 polls/quantum) mirroring JS
+ *              sweepClusterDynamicK. Comes from the config label's K field.
  */
-void get_spatioTemporal_memoryGram_ChromeMock_jsmap(LazyMap *m, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename){
+void get_spatioTemporal_memoryGram_ChromeMock_jsmap(LazyMap *m, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename, int K){
     if (!m || !m->buf) {
         fprintf(stderr, "FATAL: LazyMap is NULL/unbuilt.\n");
         return;
@@ -618,6 +657,11 @@ void get_spatioTemporal_memoryGram_ChromeMock_jsmap(LazyMap *m, int NoC, uint64_
     uint64_t total_samples_per_cluster = TST_cycles / (NoC * SST_cycles);
     uint64_t SST_us = (SST_cycles * 1000000) / g_tsc_freq_hz;  // Convert SST_cycles to microseconds for mock timer
 
+    // Dynamic-K initial batch = ~4 full cluster sweeps (JS: nodeCounts[0]*4), computed ONCE.
+    // nodeCounts is equal across clusters for pow2 NoC. Only used when K == 0.
+    uint32_t initialK = (uint32_t)(m->nodeCounts[0] * 4);
+    if (initialK < MIN_DYNAMIC_K) initialK = MIN_DYNAMIC_K;
+
     // 2. Spatio-Temporal Sampling Phase (Strictly NO I/O here)
     for (uint64_t s = 0; s < total_samples_per_cluster; s++) {
         for (int c = 0; c < NoC; c++) {
@@ -630,17 +674,40 @@ void get_spatioTemporal_memoryGram_ChromeMock_jsmap(LazyMap *m, int NoC, uint64_
             uint64_t start_cluster = chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed);
             uint64_t end_cluster = start_cluster + SST_us;
 
-            int check_count = 0;
-
-            while (1) {
-                curr = buf[curr];   // JS index chase: the access AND the next-node link
-                count++;
-
-                if (++check_count == ACCESSES_TILL_TIMER_POLL) {
-                    if (chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed) >= end_cluster) {
-                        break;
+            if (K != 0) {
+                // FIXED-K: poll the mock clock every K accesses (K from the config label).
+                int check_count = 0;
+                while (1) {
+                    curr = buf[curr];   // JS index chase: the access AND the next-node link
+                    count++;
+                    if (++check_count == K) {
+                        if (chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed) >= end_cluster) {
+                            break;
+                        }
+                        check_count = 0;
                     }
-                    check_count = 0;
+                }
+            } else {
+                // DYNAMIC-K: start with a large batch, then size each subsequent batch to a
+                // damped (x0.5) fraction of the time remaining, floored at MIN_DYNAMIC_K, so the
+                // clock is polled only ~5-9 times per quantum. Mirrors JS sweepClusterDynamicK.
+                uint64_t prev = start_cluster;
+                uint32_t k = initialK;
+                for (;;) {
+                    for (uint32_t i = 0; i < k; i++) curr = buf[curr];  // hot chase, no timer poll
+                    count += k;
+                    uint64_t now = chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed);
+                    if (now >= end_cluster) break;
+                    uint64_t batch_us = now - prev;
+                    prev = now;
+                    uint64_t remaining = end_cluster - now;
+                    if (batch_us > 0) {
+                        // k_next = max(MIN_DYNAMIC_K, floor((k/batch_us) * remaining * 0.5))
+                        uint64_t kn = ((uint64_t)k * remaining) / batch_us / 2;
+                        k = (kn > (uint64_t)MIN_DYNAMIC_K) ? (uint32_t)kn : (uint32_t)MIN_DYNAMIC_K;
+                    } else {
+                        k = MIN_DYNAMIC_K;  // batch finished within the clock's ~100us clamp
+                    }
                 }
             }
 
@@ -687,7 +754,7 @@ static const char* timer_mode_subdir(int timer_mode) {
 }
 
 
-int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, char *output_dir, const char *backing_file, const char *BIN_file, int timer_mode) {
+int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, char *output_dir, const char *backing_file, const char *BIN_file, int timer_mode, int shuffleClusters) {
     l3pp_t l3 = NULL;
     void **e_sets = NULL;
 
@@ -696,6 +763,13 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
     // Calculate matrix dimensions
     int NoC = parse_NoC_from_dirname(output_dir);
     int setsPerCluster = l3_getSets(l3)/NoC;
+
+    // K = accesses between mock-clock polls (from the config label's "{K}K" field).
+    // K == 0 selects the dynamic-K jsmap sweep; a missing/malformed field defaults to the
+    // fixed 90-access cadence. Only used by the jsmap sampler (timer_mode 2).
+    int K = parse_K_from_dirname(output_dir);
+    if (K < 0) K = ACCESSES_TILL_TIMER_POLL;
+    printf("K (mock-clock poll cadence): %d %s\n", K, (K == 0) ? "(dynamic-K)" : "(fixed)");
 
     uint64_t TST_cycles = g_tsc_freq_hz * tst_sec;  
     //print TST_Cycles and g_tsc_freq_hz
@@ -748,6 +822,17 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
             l3_release(l3);
             return 1;
         }
+        // Shuffled-cluster A/B (coverage->accuracy test): line-shuffle each cluster's ring
+        // ONCE, before sampling, so every sample reuses the SAME fixed scattered layout (matches
+        // how the jsmap victim is built once). Membership is preserved -- only traversal order
+        // changes. Gated to timer_mode 1 (Chrome-mock Mastik e-sets); fixed seed = reproducible.
+        if (shuffleClusters && timer_mode == 1) {
+            srand(SHUFFLE_SEED);
+            for (int c = 0; c < NoC; c++)
+                shuffle_cluster_nodes(Clusters, c, l3_getAssociativity(l3));
+            printf("[INFO] Clusters line-shuffled ONCE (seed %d) -> data/chrome_clock_shuffled/\n",
+                   SHUFFLE_SEED);
+        }
     }
 
     // Pre-allocate and initialize matrix to 0
@@ -775,8 +860,12 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
 
             // 1. DYNAMIC FILE NAMING
             char dynamic_output_path[256];
+            // Shuffled Mastik e-set runs go to a distinct tree so data/chrome_clock/ is never
+            // overwritten; only applies to timer_mode 1 (where the shuffle is active).
+            const char *clock_subdir = (shuffleClusters && timer_mode == 1)
+                                       ? "chrome_clock_shuffled" : timer_mode_subdir(timer_mode);
             snprintf(dynamic_output_path, sizeof(dynamic_output_path), "data/%s/%s/%s/%d.csv",
-                    timer_mode_subdir(timer_mode),
+                    clock_subdir,
                     output_dir, stress_battery[s_idx].stressor_name, iteration);
 
             // Ensure output directory exists
@@ -817,8 +906,8 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
                 case 1:  // Use chrome_mock_timer() with Mastik loaded-e_set clusters
                     get_spatioTemporal_memoryGram_ChromeMock(Clusters, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path);
                     break;
-                case 2:  // Use chrome_mock_timer() with the JS-style lazy-map victim
-                    get_spatioTemporal_memoryGram_ChromeMock_jsmap(&jmap, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path);
+                case 2:  // Use chrome_mock_timer() with the JS-style lazy-map victim (K=0 -> dynamic-K)
+                    get_spatioTemporal_memoryGram_ChromeMock_jsmap(&jmap, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path, K);
                     break;
                 default:
                     fprintf(stderr, "ERROR: Unknown timer_mode %d. Use 0 (rdtscp64), 1 (chrome mock), or 2 (chrome mock JS lazy map)\n", timer_mode);
@@ -864,4 +953,33 @@ void free_Clusters(Clusters_t *Clusters) {
     if (!Clusters) return;
     free(Clusters->clusterHeads);
     free(Clusters);
+}
+
+// Fisher-Yates shuffle of a cluster's circular node list, done ONCE before measuring.
+// Randomizing the pointer-chase order breaks the ascending in-page address stream the HW
+// prefetcher locks onto -- the native analog of JS build()'s shuffle(pages). It shuffles at
+// the LINE level (across eviction sets), so even the fixed in-page offset stride WITHIN a
+// Mastik eviction set is broken. It changes ONLY the traversal order, not cluster membership,
+// so the set of primed physical sets -- and thus the true coverage on the diagonal -- is
+// unchanged. Shared by the coverage validator (native shuffled A/B) and the fingerprinting
+// shuffled-cluster experiment (runStressNG_batches, timer_mode 1).
+void shuffle_cluster_nodes(Clusters_t *clusters, int c, int assoc) {
+    void *head = clusters->clusterHeads[c];
+    if (!head) return;
+    int n = clusters->counts[c] * assoc;
+    if (n < 2) return;
+
+    void **nodes = malloc((size_t)n * sizeof(void *));
+    if (!nodes) return;
+    void *curr = head;
+    for (int i = 0; i < n; i++) { nodes[i] = curr; curr = LNEXT(curr); }
+
+    for (int i = n - 1; i > 0; i--) {          // Fisher-Yates
+        int j = rand() % (i + 1);
+        void *tmp = nodes[i]; nodes[i] = nodes[j]; nodes[j] = tmp;
+    }
+
+    for (int i = 0; i < n; i++) LNEXT(nodes[i]) = nodes[(i + 1) % n];  // re-link circular
+    clusters->clusterHeads[c] = nodes[0];
+    free(nodes);
 }

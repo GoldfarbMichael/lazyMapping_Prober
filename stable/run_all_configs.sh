@@ -29,9 +29,12 @@ trap cleanup SIGINT SIGTERM
 # ============================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BATCH_RUNNER="$SCRIPT_DIR/batch_runner.sh"
-# TIMER_MODE="-c"  # Chrome timer (Mastik loaded-e_set clusters)
+TIMER_MODE="-c"  # Chrome timer (Mastik loaded-e_set clusters)
 # TIMER_MODE="-n"  # native timer
-TIMER_MODE="-j"  # Chrome timer + JS-style lazy-map victim (data/chrome_clock_jsmap/...)
+# TIMER_MODE="-j"  # Chrome timer + JS-style lazy-map victim (data/chrome_clock_jsmap/...)
+# Shuffled-cluster A/B: set to "-s" WITH TIMER_MODE="-c" to line-shuffle the Mastik clusters
+# once -> data/chrome_clock_shuffled/. Empty (default) = normal contiguous clusters.
+SHUFFLE_FLAG="-s"
 COOLDOWN_SECS=60
 LOG_DIR="$SCRIPT_DIR/batch_logs"
 
@@ -59,6 +62,7 @@ echo "Configuration:"
 echo "  Script Directory:  $SCRIPT_DIR"
 echo "  Batch Runner:      $BATCH_RUNNER"
 echo "  Timer Mode:        $TIMER_MODE"
+echo "  Shuffle Flag:      ${SHUFFLE_FLAG:-<none>}"
 echo "  Cooldown:          $COOLDOWN_SECS seconds"
 echo "  Log Directory:     $LOG_DIR"
 echo ""
@@ -95,7 +99,7 @@ format_duration() {
 # ============================================
 CONFIGS=()
 # POWERS_OF_2=(1 2 4 8 16 32 64 256 512 1024 2048 4096)
-POWERS_OF_2=(1 2 4 8 16 32 64 256 512 1024 2048)
+POWERS_OF_2=(1 2 4 8 16 32 64)
 # POWERS_OF_2=(2)
 
 for cores in "${POWERS_OF_2[@]}"; do
@@ -122,7 +126,7 @@ for ((i=0; i<TOTAL_CONFIGS; i++)); do
     sudo -v 2>/dev/null
     
     # Run the batch_runner.sh
-    CMD="sudo $BATCH_RUNNER $TIMER_MODE $CONFIG"
+    CMD="sudo $BATCH_RUNNER $TIMER_MODE $SHUFFLE_FLAG $CONFIG"
     echo "   Command: $CMD"
     echo "   Output:  $BATCH_LOG"
     echo ""

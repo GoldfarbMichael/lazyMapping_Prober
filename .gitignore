@@ -4,7 +4,7 @@ lazyMapping_Prober
 
 # Claude config (symlinked, machine-local)
 CLAUDE.md
-
+*.md
 # Log files
 *.jsonl
 *.json
@@ -42,3 +42,5 @@ __pycache__/
 *.pyc
 /docs/
 *.png
+
+*newAnalysis(PC37)

@@ -168,33 +168,9 @@ static void sweep_cluster_once(Clusters_t *clusters, int c, int assoc) {
     }
 }
 
-// Fisher-Yates shuffle of a cluster's circular node list, done ONCE at build time
-// before measuring. Randomizing the pointer-chase order breaks the ascending in-page
-// address stream the HW prefetcher locks onto -- the native analog of JS build()'s
-// shuffle(pages). It shuffles at the LINE level (across eviction sets), so even the
-// fixed in-page offset stride WITHIN a Mastik eviction set is broken. It changes ONLY
-// the traversal order, not cluster membership, so the set of primed physical sets --
-// and thus the true coverage on the diagonal -- is unchanged.
-static void shuffle_cluster_nodes(Clusters_t *clusters, int c, int assoc) {
-    void *head = clusters->clusterHeads[c];
-    if (!head) return;
-    int n = clusters->counts[c] * assoc;
-    if (n < 2) return;
-
-    void **nodes = malloc((size_t)n * sizeof(void *));
-    if (!nodes) return;
-    void *curr = head;
-    for (int i = 0; i < n; i++) { nodes[i] = curr; curr = LNEXT(curr); }
-
-    for (int i = n - 1; i > 0; i--) {          // Fisher-Yates
-        int j = rand() % (i + 1);
-        void *tmp = nodes[i]; nodes[i] = nodes[j]; nodes[j] = tmp;
-    }
-
-    for (int i = 0; i < n; i++) LNEXT(nodes[i]) = nodes[(i + 1) % n];  // re-link circular
-    clusters->clusterHeads[c] = nodes[0];
-    free(nodes);
-}
+// shuffle_cluster_nodes() (Fisher-Yates over a cluster's circular node list) now lives in
+// mastikElite.c and is declared in mastikElite.h, so it is shared with the fingerprinting
+// path's shuffled-cluster experiment. Behaviour here is unchanged.
 
 // Prime ONE set (mapping A) -> sweep cluster c once (mapping B, in-process) -> probe.
 // res[0] after the forward probe = miss count = lines the lazy sweep evicted. Serial
@@ -218,13 +194,23 @@ static uint16_t probe_set_native(l3pp_t l3, int setIdx, void *head,
 
 // Prime ONE set (mapping A) -> sweep JS lazy cluster c -> probe. Mirrors
 // probe_set_native but sweeps the mmap JS-faithful victim instead of a Clusters_t.
+// EV = eviction-strategy sweep active iff any of A/D/C is non-identity (>1).
+static inline int ev_active(int A, int D, int C) { return A > 1 || D > 1 || C > 1; }
+
+// One prime -> victim sweep -> probe. The victim sweep is either the JS pointer chase
+// (sweep_lazy_once, default) or the Rowhammer.js eviction-strategy pattern (sweep_lazy_evict,
+// when A/D/C are non-identity). Everything else mirrors probe_set_native.
 static uint16_t probe_set_jsmap(l3pp_t l3, int setIdx, void *head, const LazyMap *m, int c,
-                                int passes, int accessesPerLine, int sameAddr) {
+                                int passes, int accessesPerLine, int sameAddr, int buddyTouch,
+                                int A, int D, int C) {
     uint16_t res[4];
     l3_unmonitorall(l3);
     l3_monitor_manual(l3, setIdx, head);
     l3_bprobecount(l3, res);                                    // prime (backward warm)
-    sweep_lazy_once(m, c, passes, accessesPerLine, sameAddr);   // victim sweeps cluster c
+    if (ev_active(A, D, C))
+        sweep_lazy_evict(m, c, A, D, C);                        // eviction-strategy access pattern
+    else
+        sweep_lazy_once(m, c, passes, accessesPerLine, sameAddr, buddyTouch); // JS pointer chase
     l3_probecount(l3, res);                                     // measure; res[0] = misses
     return res[0];
 }
@@ -528,7 +514,8 @@ static int run_native_experiment(int noc, int iterIdx, int shuffle) {
 // native victim is byte-for-byte the same construction the browser sweeps.
 // -----------------------------------------------------------------------------
 static int run_native_jsmap_experiment(int noc, int iterIdx, int shuffle,
-                                       int passes, int accessesPerLine, int sameAddr) {
+                                       int passes, int accessesPerLine, int sameAddr,
+                                       int buddyTouch, int A, int D, int C) {
     pin_to_core(PROBER_CORE);
     // Deterministic per-iteration page shuffle (reproducible across reruns of the same iter).
     if (shuffle) srand((unsigned)(iterIdx + 1));
@@ -580,7 +567,7 @@ static int run_native_jsmap_experiment(int noc, int iterIdx, int shuffle,
     for (int c = 0; c < noc; c++) {
         uint16_t *row = &matrix[(size_t)c * numSets];
         for (int i = 0; i < numSets; i++) {
-            row[i] = e_setsA[i] ? probe_set_jsmap(l3A, i, e_setsA[i], &map, c, passes, accessesPerLine, sameAddr) : 0;
+            row[i] = e_setsA[i] ? probe_set_jsmap(l3A, i, e_setsA[i], &map, c, passes, accessesPerLine, sameAddr, buddyTouch, A, D, C) : 0;
         }
         int g = get_active_group(row, setsPerGroup, numSets, assoc);
         printf("[cov-jsmap] cluster %d -> dominant group %d\n", c, g);
@@ -594,7 +581,8 @@ static int run_native_jsmap_experiment(int noc, int iterIdx, int shuffle,
     uint64_t sweepCycles = UINT64_MAX;
     for (int r = 0; r < 5; r++) {
         uint64_t t0 = rdtscp64();
-        sweep_lazy_once(&map, 0, passes, accessesPerLine, sameAddr);
+        if (ev_active(A, D, C)) sweep_lazy_evict(&map, 0, A, D, C);
+        else                    sweep_lazy_once(&map, 0, passes, accessesPerLine, sameAddr, buddyTouch);
         uint64_t dt = rdtscp64() - t0;
         if (dt < sweepCycles) sweepCycles = dt;
     }
@@ -606,16 +594,19 @@ static int run_native_jsmap_experiment(int noc, int iterIdx, int shuffle,
             row[i] = e_setsA[i] ? probe_set(l3A, i, e_setsA[i], sweepCycles) : 0;
     }
 
-    // 5. Write outputs. Every jsmap run gets its OWN (passes, accesses/line) tree so it
-    // never collides with the mapping_B `native shuffle` tree (also data/coverage/native_shuffled)
-    // or with a different knob combo: e.g. native_shuffled_p1a1, native_shuffled_p2a4.
-    //   shuffle=1 -> data/coverage/native_shuffled_p{P}a{A}[_same]
-    //   shuffle=0 -> data/coverage/native_jsmap_p{P}a{A}[_same]
-    // The "_same" suffix marks the same-exact-address access pattern (vs different words).
-    const char *root = shuffle ? DATA_DIR "/native_shuffled" : DATA_DIR "/native_jsmap";
-    char baseDir[128];
-    snprintf(baseDir, sizeof(baseDir), "%s_p%da%d%s", root, passes, accessesPerLine,
-             sameAddr ? "_same" : "");
+    // 5. Write outputs. Every jsmap run gets its OWN knob-tagged tree so it never collides with
+    // the mapping_B real-eviction-set trees (native / native_shuffled) or with another knob combo:
+    //   shuffle=1 -> data/coverage/native_jsmap_shuffled_p{P}a{A}[_same][_buddy][_evA{A}D{D}C{C}]
+    //   shuffle=0 -> data/coverage/native_jsmap_p{P}a{A}[_same][_buddy][_evA{A}D{D}C{C}]
+    // "_same" = same-exact-address access pattern (vs different words); "_buddy" = 128B adjacent-line
+    // reinforcement diagnostic; "_evA{A}D{D}C{C}" = Rowhammer.js eviction-strategy sweep (replaces the
+    // pointer chase; passes/accesses/same/buddy are inert in that mode).
+    const char *root = shuffle ? DATA_DIR "/native_jsmap_shuffled" : DATA_DIR "/native_jsmap";
+    char evsuf[32] = "";
+    if (ev_active(A, D, C)) snprintf(evsuf, sizeof(evsuf), "_evA%dD%dC%d", A, D, C);
+    char baseDir[160];
+    snprintf(baseDir, sizeof(baseDir), "%s_p%da%d%s%s%s", root, passes, accessesPerLine,
+             sameAddr ? "_same" : "", buddyTouch ? "_buddy" : "", evsuf);
     char dir[256], missPath[300];
     snprintf(dir, sizeof(dir), "%s/NoC%02d", baseDir, noc);
     mkdir_p(dir);
@@ -670,8 +661,13 @@ int main(int argc, char **argv) {
     //            data/coverage/native_shuffled; default (unshuffled pages) ->
     //            data/coverage/native_jsmap. argv[5]=passes (full sweeps/probe; default 1),
     //            argv[6]=accesses per line (default 3), argv[7]="same" to repeat the EXACT
-    //            same address (vs different words; default "words"). Every jsmap run writes
-    //            its own _p{P}a{A}[_same] tree (e.g. native_shuffled_p1a3_same).
+    //            same address (vs different words; default "words"), argv[8]="buddy" to also
+    //            demand-access each line's 128B buddy (reinforcement diagnostic; default off),
+    //            argv[9..11]=eviction-strategy params A D C (default 1 1 1 = off): when any >1,
+    //            the victim uses the Rowhammer.js sliding-window sweep (sweep_lazy_evict) instead
+    //            of the pointer chase, and passes/accesses/same/buddy become inert.
+    //            Every jsmap run writes its own knob-tagged tree, e.g.
+    //            native_jsmap_shuffled_p1a3_buddy or native_jsmap_shuffled_p1a1_evA2D4C1.
     int noc     = (argc > 1) ? atoi(argv[1]) : DEFAULT_NOC;
     int iterIdx = (argc > 2) ? atoi(argv[2]) : 0;
     const char *mode = (argc > 3) ? argv[3] : "browser";
@@ -691,11 +687,20 @@ int main(int argc, char **argv) {
         int passes          = (argc > 5) ? atoi(argv[5]) : 1;
         int accessesPerLine = (argc > 6) ? atoi(argv[6]) : 3;
         int sameAddr        = (argc > 7) && strcmp(argv[7], "same") == 0;
+        int buddyTouch      = (argc > 8) && strcmp(argv[8], "buddy") == 0;
+        // Eviction-strategy params (argv[9..11], default 1 = identity/off): A=window repeats,
+        // D=sliding window size, C=step. Any >1 selects the sweep_lazy_evict access pattern.
+        int A = (argc > 9)  ? atoi(argv[9])  : 1;
+        int D = (argc > 10) ? atoi(argv[10]) : 1;
+        int C = (argc > 11) ? atoi(argv[11]) : 1;
         if (passes < 1) passes = 1;
         if (accessesPerLine < 1) accessesPerLine = 1;
+        if (A < 1) A = 1;
+        if (D < 1) D = 1;
+        if (C < 1) C = 1;
         // The 16-word cap only applies to the "words" pattern; same-address can repeat freely.
         if (!sameAddr && accessesPerLine > JS_ELEMS_PER_LINE) accessesPerLine = JS_ELEMS_PER_LINE;
-        return run_native_jsmap_experiment(noc, iterIdx, shuffle, passes, accessesPerLine, sameAddr);
+        return run_native_jsmap_experiment(noc, iterIdx, shuffle, passes, accessesPerLine, sameAddr, buddyTouch, A, D, C);
     }
     if (strcmp(mode, "browser") != 0) {
         fprintf(stderr, "Unknown mode '%s' (use 'browser', 'native', or 'jsmap')\n", mode);

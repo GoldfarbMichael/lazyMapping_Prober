@@ -44,32 +44,32 @@ if [[ $# -eq 0 ]]; then
     exit 1
 fi
 
-# Parse timer mode flag if present
-if [[ "$1" == "-c" ]]; then
-    TIMER_MODE="-c"
-    echo "Timer Mode set to: Chrome Mock (-c)"
-    shift  # Move to next argument
-elif [[ "$1" == "-n" ]]; then
-    TIMER_MODE="-n"
-    echo "Timer Mode set to: Native rdtscp64 (-n)"
-    shift  # Move to next argument
-elif [[ "$1" == "-j" ]]; then
-    TIMER_MODE="-j"
-    echo "Timer Mode set to: Chrome Mock + JS-style lazy map (-j)"
-    shift  # Move to next argument
-elif [[ "$1" == "-h" || "$1" == "--help" ]]; then
-    echo "Usage: $0 [-c|-n] CONFIG_DIR"
-    echo ""
-    echo "Options:"
-    echo "  -c              : Use Chrome mock timer (jittered, 100us clamped)"
-    echo "  -n              : Use native rdtscp64 timer (default)"
-    echo "  -h, --help      : Show this help message"
-    echo ""
-    echo "Arguments:"
-    echo "  CONFIG_DIR      : Configuration directory name (e.g., '16C_15TST_DynamicSST')"
-    echo ""
-    exit 0
-fi
+# Parse leading flags (timer mode + optional -s shuffle), in any order, until CONFIG_DIR.
+SHUFFLE_FLAG=""   # "-s" line-shuffles the Mastik clusters once (only meaningful with -c)
+while [[ "$1" == -* ]]; do
+    case "$1" in
+        -c) TIMER_MODE="-c"; echo "Timer Mode set to: Chrome Mock (-c)"; shift ;;
+        -n) TIMER_MODE="-n"; echo "Timer Mode set to: Native rdtscp64 (-n)"; shift ;;
+        -j) TIMER_MODE="-j"; echo "Timer Mode set to: Chrome Mock + JS-style lazy map (-j)"; shift ;;
+        -s) SHUFFLE_FLAG="-s"; echo "Cluster shuffle: ON (-s; effective only with -c)"; shift ;;
+        -h|--help)
+            echo "Usage: $0 [-c|-n|-j] [-s] CONFIG_DIR"
+            echo ""
+            echo "Options:"
+            echo "  -c              : Use Chrome mock timer (jittered, 100us clamped)"
+            echo "  -n              : Use native rdtscp64 timer (default)"
+            echo "  -j              : Use Chrome mock timer with the JS-style lazy-map victim"
+            echo "  -s              : Line-shuffle the Mastik clusters once (only with -c;"
+            echo "                    -> data/chrome_clock_shuffled/)"
+            echo "  -h, --help      : Show this help message"
+            echo ""
+            echo "Arguments:"
+            echo "  CONFIG_DIR      : Configuration directory name (e.g., '16C_15TST_DynamicSST')"
+            echo ""
+            exit 0 ;;
+        *) echo "❌ Unknown flag: $1"; echo "Usage: $0 [-c|-n|-j] [-s] CONFIG_DIR"; exit 1 ;;
+    esac
+done
 
 # CONFIG_DIR should be the next argument (or first if no flag)
 if [[ -z "$1" ]]; then
@@ -91,6 +91,10 @@ case "$TIMER_MODE" in
     -j) TIMER_SUBDIR="chrome_clock_jsmap" ;;
     *)  TIMER_SUBDIR="native_clock" ;;
 esac
+# Shuffled Mastik e-set runs go to a distinct tree (must match the C tool's output path).
+if [[ -n "$SHUFFLE_FLAG" && "$TIMER_MODE" == "-c" ]]; then
+    TIMER_SUBDIR="chrome_clock_shuffled"
+fi
 mkdir -p "data/$TIMER_SUBDIR/$CONFIG_DIR"  # Ensure config-specific data directory exists
 
 # ============================================
@@ -165,7 +169,7 @@ for ((batch=1; batch<=NUM_BATCHES; batch++)); do
     echo "   Start Time: $(date '+%Y-%m-%d %H:%M:%S')"
     echo "   System Health: $(check_system_health)"
     echo "   Estimated runtime: ~${EST_SECS}s | Kill timeout: ${TIMEOUT_SECS}s"
-    echo "   Running: sudo $PROGRAM $TIMER_MODE $START_ITER $ACTUAL_BATCH_SIZE $CONFIG_DIR"
+    echo "   Running: sudo $PROGRAM $TIMER_MODE $SHUFFLE_FLAG $START_ITER $ACTUAL_BATCH_SIZE $CONFIG_DIR"
     print_separator
 
     # Run the program with a workload-derived timeout (hang recovery only; never trims a healthy run).
@@ -174,7 +178,7 @@ for ((batch=1; batch<=NUM_BATCHES; batch++)); do
     MAX_RETRIES=3
 
     while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-        sudo timeout "$TIMEOUT_SECS" $PROGRAM $TIMER_MODE $START_ITER $ACTUAL_BATCH_SIZE $CONFIG_DIR >> "$BATCH_LOG" 2>&1
+        sudo timeout "$TIMEOUT_SECS" $PROGRAM $TIMER_MODE $SHUFFLE_FLAG $START_ITER $ACTUAL_BATCH_SIZE $CONFIG_DIR >> "$BATCH_LOG" 2>&1
         EXIT_CODE=$?
 
         if [ $EXIT_CODE -eq 124 ]; then

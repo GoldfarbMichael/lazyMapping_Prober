@@ -51,7 +51,8 @@ int build_lazy_mapping(LazyMap *m, int noc, int llcSets, int llcWays, int shuffl
 
     m->heads      = malloc((size_t)noc * sizeof(uint32_t));
     m->nodeCounts = malloc((size_t)noc * sizeof(int));
-    uint32_t **clusterNodes = malloc((size_t)noc * sizeof(uint32_t *));
+    m->clusterNodes = malloc((size_t)noc * sizeof(uint32_t *));  // RETAINED (indexed eviction-strategy sweep)
+    uint32_t **clusterNodes = m->clusterNodes;
     int *fill = calloc((size_t)noc, sizeof(int));
     int *pages = malloc((size_t)numPages * sizeof(int));
     if (!m->heads || !m->nodeCounts || !clusterNodes || !fill || !pages) {
@@ -81,16 +82,21 @@ int build_lazy_mapping(LazyMap *m, int noc, int llcSets, int llcWays, int shuffl
             m->buf[clusterNodes[c][i]] = clusterNodes[c][(i + 1) % len];  // circular link
         m->heads[c] = clusterNodes[c][0];
         m->nodeCounts[c] = len;
-        free(clusterNodes[c]);
+        // clusterNodes[c] is RETAINED in m->clusterNodes (freed by free_lazy_mapping) so the
+        // eviction-strategy sweep can index nodes directly; only free the scratch arrays.
     }
-    free(clusterNodes); free(fill); free(pages);
+    free(fill); free(pages);
     return 0;
 }
 
 void free_lazy_mapping(LazyMap *m) {
     if (m->buf && m->buf != MAP_FAILED) munmap(m->buf, m->bytes);
+    if (m->clusterNodes) {
+        for (int c = 0; c < m->numClusters; c++) free(m->clusterNodes[c]);
+        free(m->clusterNodes);
+    }
     free(m->heads); free(m->nodeCounts);
-    m->buf = NULL; m->heads = NULL; m->nodeCounts = NULL;
+    m->buf = NULL; m->heads = NULL; m->nodeCounts = NULL; m->clusterNodes = NULL;
 }
 
 // Sweep cluster c's circular list (JS main.js hammerCluster) with replacement-policy
@@ -106,8 +112,11 @@ void free_lazy_mapping(LazyMap *m) {
 //                     coalesce identical loads, so this can issue fewer real lookups).
 //   passes          - full traversals of the cluster per probe (interleaved re-access:
 //                     each line is revisited only after the rest of the cluster is touched).
+//   buddyTouch      - 1: after each node, also demand-access the line's 128B buddy
+//                     (curr ^ JS_ELEMS_PER_LINE, i.e. line v^1 in the same page), injecting
+//                     immediate adjacent-line reinforcement. Default 0 = plain JS behaviour.
 void sweep_lazy_once(const LazyMap *m, int c, int passes, int accessesPerLine,
-                     int sameAddr) {
+                     int sameAddr, int buddyTouch) {
     const uint32_t *buf = m->buf;
     int n = m->nodeCounts[c];
     uint32_t curr = m->heads[c];
@@ -115,6 +124,8 @@ void sweep_lazy_once(const LazyMap *m, int c, int passes, int accessesPerLine,
     for (int p = 0; p < passes; p++) {
         for (int i = 0; i < n; i++) {
             uint32_t next = buf[curr];               // 1st access (offset 0 = chase link)
+            if (buddyTouch)
+                sink += buf[curr ^ JS_ELEMS_PER_LINE]; // ALSO touch 128B buddy (P, v^1)
             if (sameAddr) {
                 for (int r = 1; r < accessesPerLine; r++)
                     maccessMy((void *)(buf + curr));  // SAME exact address, repeated
@@ -126,4 +137,24 @@ void sweep_lazy_once(const LazyMap *m, int c, int passes, int accessesPerLine,
         }
     }
     g_lazy_sink = curr + (uint32_t)sink;
+}
+
+// Rowhammer.js-style sliding-window eviction strategy over cluster c's retained node array.
+// See lazy_map.h for parameter semantics. A=D=C=1 is the identity single linear pass. Indexed
+// access (buf[nodes[idx]]) rather than the pointer chase, so the pattern is exactly what a JS
+// Uint32Array victim would run. sink feeds g_lazy_sink to prevent dead-code elimination.
+void sweep_lazy_evict(const LazyMap *m, int c, int A, int D, int C) {
+    const uint32_t *buf   = m->buf;
+    const uint32_t *nodes = m->clusterNodes[c];
+    int n = m->nodeCounts[c];
+    if (A < 1) A = 1;
+    if (C < 1) C = 1;
+    if (D < 1) D = 1;
+    if (D > n) D = n;                       // window can't exceed the cluster
+    uint64_t sink = 0;
+    for (int s = 0; s + D <= n; s += C)     // slide window of D, step C
+        for (int a = 0; a < A; a++)         // hammer the window A times
+            for (int d = 0; d < D; d++)     // ... over its D lines
+                sink += buf[nodes[s + d]];
+    g_lazy_sink += (uint32_t)sink;
 }

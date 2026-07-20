@@ -536,8 +536,15 @@ uint64_t chrome_mock_timer(uint64_t tsc_freq_hz, uint32_t context_seed, uint32_t
     }
 
 
-    // 8. Convert cycles to microseconds and return as int
-    return (uint64_t)((result_cycles * 1000000) / tsc_freq_hz);
+    // 8. Convert cycles to microseconds and return as int.
+    // NOTE: result_cycles is the ABSOLUTE TSC (~2.85e15 after 9 days uptime). A 64-bit
+    // "result_cycles * 1000000" overflows uint64 (max ~1.84e19) once the TSC exceeds ~1.84e13
+    // (~85 min of uptime), wrapping the returned time roughly every 85 min. When a sampling
+    // window straddled that wrap, the mock clock jumped backwards and the sweep's exit test
+    // (mock_timer >= start + SST_us) never fired -> multi-minute/hour CPU spins. Doing the
+    // multiply in 128-bit removes the overflow entirely, so the returned microseconds are
+    // truly monotonic for any realistic uptime.
+    return (uint64_t)(((unsigned __int128)result_cycles * 1000000) / tsc_freq_hz);
 }
 
 uint64_t wait_edge(uint64_t tsc_freq_hz, uint32_t context_seed, uint32_t secret_seed){

@@ -53,11 +53,16 @@ Clusters_t* eviction_sets_to_Clusters(void ***e_sets, int num_sets, int NoC);
 
 void get_spatioTemporal_memoryGram(Clusters_t *Clusters, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename);
 
-void get_spatioTemporal_memoryGram_ChromeMock_jsmap(LazyMap *m, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename);
+void get_spatioTemporal_memoryGram_ChromeMock_jsmap(LazyMap *m, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename, int K);
 
-int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, char *output_dir,const char *backing_file, const char *BIN_file, int timer_mode);
+int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, char *output_dir,const char *backing_file, const char *BIN_file, int timer_mode, int shuffleClusters);
 
 
 
 void free_Clusters(Clusters_t *Clusters);
+
+// Fisher-Yates shuffle of cluster c's circular node list (traversal order only, not
+// membership). Shared by the coverage validator and the fingerprinting shuffled-cluster
+// experiment. See mastikElite.c for details.
+void shuffle_cluster_nodes(Clusters_t *clusters, int c, int assoc);
 #endif // MASTIK_ELITE_H

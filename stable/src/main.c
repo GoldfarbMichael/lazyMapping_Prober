@@ -192,6 +192,7 @@ int main(int argc, char **argv) {
     int batch_size = SAMPLES_PER_STRESSOR;
     char *output_dir = "data";
     int timer_mode = 0;  // Default: 0 = native (rdtscp64), 1 = chrome
+    int shuffleClusters = 0;  // -s: line-shuffle the Mastik e-set clusters once (timer_mode 1 only)
 
     // Parse command-line flags for timer mode
     int first_positional_arg = 1;
@@ -205,6 +206,9 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "-j") == 0) {
             timer_mode = 2;  // Chrome mock timer, JS-style lazy-map victim
             printf("[INFO] Timer Mode: Chrome Mock + JS-style lazy map (-j)\n");
+        } else if (strcmp(argv[i], "-s") == 0) {
+            shuffleClusters = 1;  // line-shuffle clusters once (only active with -c / timer_mode 1)
+            printf("[INFO] Cluster shuffle: ON (-s; effective only with -c)\n");
         } else if (argv[i][0] != '-') {
             // First non-flag argument starts positional args
             first_positional_arg = i;
@@ -240,7 +244,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Options:\n");
         fprintf(stderr, "  -c              : Use Chrome mock timer (jittered, 100us clamped), Mastik e_set clusters\n");
         fprintf(stderr, "  -n              : Use native rdtscp64 timer (default)\n");
-        fprintf(stderr, "  -j              : Use Chrome mock timer with the JS-style lazy-map victim\n\n");
+        fprintf(stderr, "  -j              : Use Chrome mock timer with the JS-style lazy-map victim\n");
+        fprintf(stderr, "  -s              : Line-shuffle the Mastik clusters once (coverage->accuracy A/B; only with -c\n");
+        fprintf(stderr, "                    -> data/chrome_clock_shuffled/)\n\n");
         fprintf(stderr, "Arguments:\n");
         fprintf(stderr, "  start_iteration : Starting index for this batch (0-based)\n");
         fprintf(stderr, "  batch_size      : Number of iterations to run in this batch\n");
@@ -257,7 +263,7 @@ int main(int argc, char **argv) {
     // Initialize browser environment globals (MUST be called FIRST before any timer usage)
     setup_browser_environment();
     sleep(0.5);
-    runStressNG_batches(tst_sec, batch_size, start_iteration, output_dir, HUGEPAGE_PATH_A, MAPPING_FILE_A, timer_mode);
+    runStressNG_batches(tst_sec, batch_size, start_iteration, output_dir, HUGEPAGE_PATH_A, MAPPING_FILE_A, timer_mode, shuffleClusters);
 
 
 
