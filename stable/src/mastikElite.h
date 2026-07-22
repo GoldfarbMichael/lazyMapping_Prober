@@ -55,6 +55,16 @@ void get_spatioTemporal_memoryGram(Clusters_t *Clusters, int NoC, uint64_t TST_c
 
 void get_spatioTemporal_memoryGram_ChromeMock_jsmap(LazyMap *m, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename, int K);
 
+// Native-clock (rdtscp64) twin of the above: same JS-style lazy-map victim and batched-K sweep,
+// so mode 3 vs. mode 2 isolates the clock. See mastikElite.c.
+void get_spatioTemporal_memoryGram_jsmap(LazyMap *m, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename, int K);
+
+// Config-label parsers ({NoC}C_{TST}TST_{K}K_{CYCLES}cycles). parse_cycles mirrors the JS
+// CYCLES_PER_ADDRESS field (main.js LABEL_RE) and drives SST_cycles for every timer_mode.
+int parse_NoC_from_dirname(const char *dirname);
+int parse_K_from_dirname(const char *dirname);
+int parse_cycles_from_dirname(const char *dirname);
+
 int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, char *output_dir,const char *backing_file, const char *BIN_file, int timer_mode, int shuffleClusters);
 
 

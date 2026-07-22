@@ -29,14 +29,26 @@ trap cleanup SIGINT SIGTERM
 # ============================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BATCH_RUNNER="$SCRIPT_DIR/batch_runner.sh"
-TIMER_MODE="-c"  # Chrome timer (Mastik loaded-e_set clusters)
+# TIMER_MODE="-c"  # Chrome timer (Mastik loaded-e_set clusters)
 # TIMER_MODE="-n"  # native timer
 # TIMER_MODE="-j"  # Chrome timer + JS-style lazy-map victim (data/chrome_clock_jsmap/...)
+TIMER_MODE="-jn" # Native timer + JS-style lazy-map victim (data/native_clock_jsmap/...)
 # Shuffled-cluster A/B: set to "-s" WITH TIMER_MODE="-c" to line-shuffle the Mastik clusters
 # once -> data/chrome_clock_shuffled/. Empty (default) = normal contiguous clusters.
 SHUFFLE_FLAG="-s"
+# Cycles per address: the "{N}cycles" field of the config label. The C tool parses it
+# (parse_cycles_from_dirname) and sizes the cluster quantum as SST = N*setsPerCluster*assoc,
+# exactly as JS main.js does with CYCLES_PER_ADDRESS. 2288 = the Chrome-mock eval config;
+# 300 reproduces the legacy native-clock sizing (200*1.5).
+CYCLES_PER_ADDRESS=2288
 COOLDOWN_SECS=60
 LOG_DIR="$SCRIPT_DIR/batch_logs"
+
+# The jsmap victim shuffles its pages internally (build_lazy_mapping); -s is a Mastik-e_set-only
+# knob, so never forward a stale shuffle flag into a jsmap run.
+if [[ "$TIMER_MODE" == "-j" || "$TIMER_MODE" == "-jn" ]]; then
+    SHUFFLE_FLAG=""
+fi
 
 # ============================================
 # Verify prerequisites
@@ -55,7 +67,7 @@ mkdir -p "$LOG_DIR"
 
 echo ""
 echo "╔════════════════════════════════════════════════════════════════╗"
-echo "║     SEQUENTIAL BATCH RUNNER FOR ALL CORE COUNTS (1-512)        ║"
+echo "║     SEQUENTIAL BATCH RUNNER FOR ALL CLUSTER COUNTS.            ║"
 echo "╚════════════════════════════════════════════════════════════════╝"
 echo ""
 echo "Configuration:"
@@ -63,6 +75,7 @@ echo "  Script Directory:  $SCRIPT_DIR"
 echo "  Batch Runner:      $BATCH_RUNNER"
 echo "  Timer Mode:        $TIMER_MODE"
 echo "  Shuffle Flag:      ${SHUFFLE_FLAG:-<none>}"
+echo "  Cycles/address:    $CYCLES_PER_ADDRESS"
 echo "  Cooldown:          $COOLDOWN_SECS seconds"
 echo "  Log Directory:     $LOG_DIR"
 echo ""
@@ -102,8 +115,8 @@ CONFIGS=()
 POWERS_OF_2=(1 2 4 8 16 32 64)
 # POWERS_OF_2=(2)
 
-for cores in "${POWERS_OF_2[@]}"; do
-    CONFIGS+=("${cores}C_2TST_90K_2288cycles")
+for clusters in "${POWERS_OF_2[@]}"; do
+    CONFIGS+=("${clusters}C_2TST_90K_${CYCLES_PER_ADDRESS}cycles")
 done
 
 TOTAL_CONFIGS=${#CONFIGS[@]}

@@ -213,6 +213,34 @@ int parse_K_from_dirname(const char *dirname) {
     return (int)strtol(num_start, NULL, 10);
 }
 
+/**
+ * Parses the cycles-per-address field from a config dir name.
+ *
+ * Format: {NoC}C_{TST}TST_{K}K_{CYCLES}cycles, e.g. "16C_2TST_90K_2288cycles" -> 2288.
+ * This is the SAME quantity JS main.js parses as CYCLES_PER_ADDRESS (LABEL_RE) and feeds to
+ * computeQuantumMs() (Q = cyclesPerAddress * setsPerCluster * ways). Keeping C and JS on one
+ * label means both sides derive the same cluster quantum from the same config name.
+ *
+ * @return the parsed value (> 0), or -1 if the field is absent/malformed. Unlike K, 0 is NOT a
+ *         valid result here (a zero-cycle quantum is meaningless).
+ */
+int parse_cycles_from_dirname(const char *dirname) {
+    if (!dirname) return -1;
+
+    const char *c_pos = strstr(dirname, "cycles");
+    if (!c_pos || c_pos == dirname) return -1;
+
+    const char *num_end = c_pos - 1;
+    while (num_end >= dirname && isdigit((unsigned char)*num_end)) {
+        num_end--;
+    }
+    const char *num_start = num_end + 1;
+    if (num_start >= c_pos) return -1;   // no digits before "cycles"
+
+    int cycles = (int)strtol(num_start, NULL, 10);
+    return (cycles > 0) ? cycles : -1;
+}
+
 int newBackedMapping_and_saveEsets_toBinFile(l3pp_t *l3, const char *backing_file, const char *BIN_file){
     *l3 = prepareBackedL3(backing_file);
     if(!*l3) {
@@ -742,13 +770,138 @@ void get_spatioTemporal_memoryGram_ChromeMock_jsmap(LazyMap *m, int NoC, uint64_
 }
 
 
-// Output-tree subdir for a timer_mode: 0=native clock, 1=Chrome mock clock (Mastik e_sets),
-// 2=Chrome mock clock (JS-style lazy map). Keeps the JS-style A/B runs in a distinct tree so
-// the existing Mastik-e_set data (data/chrome_clock/...) is never touched.
+/**
+ * NATIVE-CLOCK twin of get_spatioTemporal_memoryGram_ChromeMock_jsmap (timer_mode==3).
+ *
+ * Same JS-style lazy-map victim (32-bit index chase over the mmap buffer, curr = buf[curr]),
+ * same batched-K sweep structure, same CSV writer -- the ONLY difference is that the clock is
+ * rdtscp64() instead of chrome_mock_timer(). That makes mode 3 vs. mode 2 a CLOCK-ONLY A/B
+ * (and mode 3 vs. mode 0 a VICTIM-ONLY A/B).
+ *
+ * The batched-K structure is retained deliberately rather than adopting the per-access poll of
+ * get_spatioTemporal_memoryGram: matching the chrome-mock sampler's sweep shape is what keeps
+ * the comparison attributable to the clock alone.
+ *
+ * @param m     Pre-built LazyMap (build_lazy_mapping); m->heads[c] = head element index of cluster c.
+ * @param NoC   Number of clusters.
+ * @param TST_cycles Total sampling time (CPU cycles); sets total time slots.
+ * @param SST_cycles Single-cluster sweep window (CPU cycles) -- used directly, no unit conversion.
+ * @param matrix Pre-allocated, zero-initialized uint32_t[total_slots * NoC]; matrix[s*NoC+c] = count.
+ * @param filename Output CSV path.
+ * @param K     Accesses between clock polls. K > 0 = fixed cadence; K == 0 = dynamic-K (adaptive
+ *              batch) mirroring JS sweepClusterDynamicK. Comes from the config label's K field.
+ */
+void get_spatioTemporal_memoryGram_jsmap(LazyMap *m, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename, int K){
+    if (!m || !m->buf) {
+        fprintf(stderr, "FATAL: LazyMap is NULL/unbuilt.\n");
+        return;
+    }
+
+    if (!matrix) {
+        fprintf(stderr, "FATAL: matrix is NULL. Must be pre-allocated and initialized to 0.\n");
+        return;
+    }
+
+    // 1. Calculate matrix dimensions
+    uint64_t total_samples_per_cluster = TST_cycles / (NoC * SST_cycles);
+
+    // Dynamic-K initial batch = ~4 full cluster sweeps (JS: nodeCounts[0]*4), computed ONCE.
+    // nodeCounts is equal across clusters for pow2 NoC. Only used when K == 0.
+    uint32_t initialK = (uint32_t)(m->nodeCounts[0] * 4);
+    if (initialK < MIN_DYNAMIC_K) initialK = MIN_DYNAMIC_K;
+
+    // 2. Spatio-Temporal Sampling Phase (Strictly NO I/O here)
+    for (uint64_t s = 0; s < total_samples_per_cluster; s++) {
+        for (int c = 0; c < NoC; c++) {
+
+            const uint32_t *buf = m->buf;
+            register uint32_t curr = m->heads[c];
+            register uint32_t count = 0;
+
+            // Set the timer constraint for this cluster (cycles throughout)
+            uint64_t start_cluster = rdtscp64();
+            uint64_t end_cluster = start_cluster + SST_cycles;
+
+            if (K != 0) {
+                // FIXED-K: poll the clock every K accesses (K from the config label).
+                int check_count = 0;
+                while (1) {
+                    curr = buf[curr];   // JS index chase: the access AND the next-node link
+                    count++;
+                    if (++check_count == K) {
+                        if (rdtscp64() >= end_cluster) {
+                            break;
+                        }
+                        check_count = 0;
+                    }
+                }
+            } else {
+                // DYNAMIC-K: start with a large batch, then size each subsequent batch to a
+                // damped (x0.5) fraction of the time remaining, floored at MIN_DYNAMIC_K. The
+                // formula k_next = max(MIN_DYNAMIC_K, (k/batch_elapsed) * remaining * 0.5) is
+                // unit-agnostic, so it carries over from the mock clock's us to rdtscp's cycles
+                // unchanged. Mirrors JS sweepClusterDynamicK.
+                uint64_t prev = start_cluster;
+                uint32_t k = initialK;
+                for (;;) {
+                    for (uint32_t i = 0; i < k; i++) curr = buf[curr];  // hot chase, no timer poll
+                    count += k;
+                    uint64_t now = rdtscp64();
+                    if (now >= end_cluster) break;
+                    uint64_t batch_cycles = now - prev;
+                    prev = now;
+                    uint64_t remaining = end_cluster - now;
+                    if (batch_cycles > 0) {
+                        uint64_t kn = ((uint64_t)k * remaining) / batch_cycles / 2;
+                        k = (kn > (uint64_t)MIN_DYNAMIC_K) ? (uint32_t)kn : (uint32_t)MIN_DYNAMIC_K;
+                    } else {
+                        // Effectively dead with rdtscp's cycle resolution (the mock clock's 100us
+                        // clamp is what made this reachable there); kept as a div-by-zero guard.
+                        k = MIN_DYNAMIC_K;
+                    }
+                }
+            }
+
+            // Store the access count
+            matrix[s * NoC + c] = count;
+        }
+    }
+
+    // 3. I/O Phase (Post-Measurement)
+    FILE *fp = fopen(filename, "w");
+    if (!fp) {
+        fprintf(stderr, "FATAL: Could not open output file %s\n", filename);
+        return;
+    }
+
+    // Write CSV Header
+    for (int g = 0; g < NoC; g++) {
+        fprintf(fp, "G%d%s", g, (g == NoC - 1) ? "" : ",");
+    }
+    fprintf(fp, "\n");
+
+    // Write Matrix Data
+    for (uint64_t t = 0; t < total_samples_per_cluster; t++) {
+        for (int g = 0; g < NoC; g++) {
+            fprintf(fp, "%u%s", matrix[t * NoC + g], (g == NoC - 1) ? "" : ",");
+        }
+        fprintf(fp, "\n");
+    }
+
+    fclose(fp);
+    printf("Successfully wrote %lu samples for %d clusters to %s\n", total_samples_per_cluster, NoC, filename);
+}
+
+
+// Output-tree subdir for a timer_mode: 0=native clock (Mastik e_sets), 1=Chrome mock clock
+// (Mastik e_sets), 2=Chrome mock clock (JS-style lazy map), 3=native clock (JS-style lazy map).
+// Keeps each victim/clock combination in a distinct tree so previously collected data is never
+// touched.
 static const char* timer_mode_subdir(int timer_mode) {
     switch (timer_mode) {
         case 1:  return "chrome_clock";
         case 2:  return "chrome_clock_jsmap";
+        case 3:  return "native_clock_jsmap";
         default: return "native_clock";
     }
 }
@@ -764,27 +917,36 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
     int NoC = parse_NoC_from_dirname(output_dir);
     int setsPerCluster = l3_getSets(l3)/NoC;
 
-    // K = accesses between mock-clock polls (from the config label's "{K}K" field).
+    // K = accesses between clock polls (from the config label's "{K}K" field).
     // K == 0 selects the dynamic-K jsmap sweep; a missing/malformed field defaults to the
-    // fixed 90-access cadence. Only used by the jsmap sampler (timer_mode 2).
+    // fixed 90-access cadence. Only used by the jsmap samplers (timer_mode 2 mock clock,
+    // timer_mode 3 native clock).
     int K = parse_K_from_dirname(output_dir);
     if (K < 0) K = ACCESSES_TILL_TIMER_POLL;
-    printf("K (mock-clock poll cadence): %d %s\n", K, (K == 0) ? "(dynamic-K)" : "(fixed)");
+    printf("K (clock poll cadence): %d %s\n", K, (K == 0) ? "(dynamic-K)" : "(fixed)");
 
-    uint64_t TST_cycles = g_tsc_freq_hz * tst_sec;  
+    // Cycles per address: the "{N}cycles" field of the config label, the SAME quantity JS
+    // main.js parses as CYCLES_PER_ADDRESS and feeds to computeQuantumMs(). Drives the cluster
+    // quantum for EVERY timer_mode, so the dir name now truthfully describes the sampling.
+    int cpa = parse_cycles_from_dirname(output_dir);
+    if (cpa <= 0) {
+        cpa = (timer_mode == 0) ? 300 : 2288;   // legacy hardcoded defaults (200*1.5 / 2288)
+        printf("[WARN] No {N}cycles field in '%s'; falling back to %d cycles/address\n", output_dir, cpa);
+    }
+    printf("Cycles per address: %d (from config label)\n", cpa);
+
+    uint64_t TST_cycles = g_tsc_freq_hz * tst_sec;
     //print TST_Cycles and g_tsc_freq_hz
     printf("TST_cycles: %lu, g_tsc_freq_hz: %lu\n", TST_cycles, g_tsc_freq_hz);
-    uint64_t SST_cycles = 200*1.5*setsPerCluster*l3_getAssociativity(l3);
-    
-    // For chrome mock timer (mode 1 Mastik e_sets, mode 2 JS-style lazy map), enforce
-    // minimum 500us window by adjusting SST_cycles. SST sizing is identical for both victims
-    // (setsPerCluster*assoc == the lazy map's nodes-per-cluster), so the A/B stays comparable.
+    uint64_t SST_cycles = (uint64_t)cpa * setsPerCluster * l3_getAssociativity(l3);
+
+    // 500us floor (JS MIN_QUANTUM_MS): applied ONLY to the Chrome-mock-clock modes (1 Mastik
+    // e_sets, 2 JS-style lazy map), where the clock's 100us clamp makes a sub-500us quantum
+    // meaningless. The native-clock modes (0 and 3) have cycle resolution and stay unfloored.
     if (timer_mode == 1 || timer_mode == 2) {
-        // SST_cycles = 1144*setsPerCluster*l3_getAssociativity(l3);
-        SST_cycles = 2288*setsPerCluster*l3_getAssociativity(l3);
         uint64_t min_SST_cycles_for_500us = (500 * g_tsc_freq_hz) / 1000000;
         if (SST_cycles < min_SST_cycles_for_500us) {
-            printf("[TIMER_MODE=1] SST_cycles adjusted: %lu -> %lu (minimum 500us window)\n", SST_cycles, min_SST_cycles_for_500us);
+            printf("[TIMER_MODE=%d] SST_cycles adjusted: %lu -> %lu (minimum 500us window)\n", timer_mode, SST_cycles, min_SST_cycles_for_500us);
             SST_cycles = min_SST_cycles_for_500us;
         }
     }
@@ -801,13 +963,15 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
 
 
     // Build the victim source. Default (timer_mode 0/1) = the Mastik loaded-eviction-set
-    // clusters (unchanged). timer_mode 2 = the JS-faithful lazy map (shuffled pages), built
-    // in a fresh mmap buffer exactly as the browser does. The loaded e_sets are unused for
-    // mode 2, but l3 is still used above for identical TST/SST sizing.
+    // clusters (unchanged). timer_mode 2 (mock clock) and 3 (native clock) = the JS-faithful
+    // lazy map (always shuffled pages), built in a fresh mmap buffer exactly as the browser
+    // does. The loaded e_sets are unused for those modes, but l3 is still used above for
+    // identical TST/SST sizing.
+    int use_jsmap = (timer_mode == 2 || timer_mode == 3);
     Clusters_t *Clusters = NULL;
     LazyMap jmap;
     memset(&jmap, 0, sizeof(jmap));
-    if (timer_mode == 2) {
+    if (use_jsmap) {
         if (build_lazy_mapping(&jmap, NoC, l3_getSets(l3), l3_getAssociativity(l3), /*shufflePages=*/1)) {
             fprintf(stderr, "Failed to build JS lazy mapping\n");
             l3_release(l3);
@@ -839,7 +1003,7 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
     uint32_t *matrix = (uint32_t *)calloc(totalSweeps_forCluster * NoC, sizeof(uint32_t));
     if (!matrix) {
         fprintf(stderr, "FATAL: Matrix allocation failed.\n");
-        if (timer_mode == 2) free_lazy_mapping(&jmap); else free_Clusters(Clusters);
+        if (use_jsmap) free_lazy_mapping(&jmap); else free_Clusters(Clusters);
         l3_release(l3);
         return 1;
     }
@@ -909,8 +1073,11 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
                 case 2:  // Use chrome_mock_timer() with the JS-style lazy-map victim (K=0 -> dynamic-K)
                     get_spatioTemporal_memoryGram_ChromeMock_jsmap(&jmap, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path, K);
                     break;
+                case 3:  // Use rdtscp64() with the JS-style lazy-map victim (K=0 -> dynamic-K)
+                    get_spatioTemporal_memoryGram_jsmap(&jmap, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path, K);
+                    break;
                 default:
-                    fprintf(stderr, "ERROR: Unknown timer_mode %d. Use 0 (rdtscp64), 1 (chrome mock), or 2 (chrome mock JS lazy map)\n", timer_mode);
+                    fprintf(stderr, "ERROR: Unknown timer_mode %d. Use 0 (rdtscp64), 1 (chrome mock), 2 (chrome mock + JS lazy map), or 3 (rdtscp64 + JS lazy map)\n", timer_mode);
                     kill(pid, SIGKILL);
                     waitpid(pid, NULL, 0);
                     return 1;
@@ -939,7 +1106,7 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
     }
     // FREE resources at the end of this config's iteration
     free(matrix);
-    if (timer_mode == 2) free_lazy_mapping(&jmap); else free_Clusters(Clusters);
+    if (use_jsmap) free_lazy_mapping(&jmap); else free_Clusters(Clusters);
     printf("[INFO] Data collection complete, Matrix and victim freed.\n");
     
     return 0;

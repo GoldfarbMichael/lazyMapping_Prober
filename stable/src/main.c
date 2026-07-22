@@ -206,6 +206,9 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "-j") == 0) {
             timer_mode = 2;  // Chrome mock timer, JS-style lazy-map victim
             printf("[INFO] Timer Mode: Chrome Mock + JS-style lazy map (-j)\n");
+        } else if (strcmp(argv[i], "-jn") == 0) {
+            timer_mode = 3;  // Native rdtscp64 clock, JS-style lazy-map victim
+            printf("[INFO] Timer Mode: Native rdtscp64 + JS-style lazy map (-jn)\n");
         } else if (strcmp(argv[i], "-s") == 0) {
             shuffleClusters = 1;  // line-shuffle clusters once (only active with -c / timer_mode 1)
             printf("[INFO] Cluster shuffle: ON (-s; effective only with -c)\n");
@@ -245,6 +248,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "  -c              : Use Chrome mock timer (jittered, 100us clamped), Mastik e_set clusters\n");
         fprintf(stderr, "  -n              : Use native rdtscp64 timer (default)\n");
         fprintf(stderr, "  -j              : Use Chrome mock timer with the JS-style lazy-map victim\n");
+        fprintf(stderr, "  -jn             : Use native rdtscp64 timer with the JS-style lazy-map victim\n");
+        fprintf(stderr, "                    (-> data/native_clock_jsmap/)\n");
         fprintf(stderr, "  -s              : Line-shuffle the Mastik clusters once (coverage->accuracy A/B; only with -c\n");
         fprintf(stderr, "                    -> data/chrome_clock_shuffled/)\n\n");
         fprintf(stderr, "Arguments:\n");
