@@ -41,6 +41,7 @@
 #include "utils.h"        // virt_to_phys, load_physical_mapping, maccessMy
 #include "mastikElite.h"  // pin_to_core, load_mapping_and_eSetsFrom_BIN_file, eviction_sets_to_Clusters
 #include "lazy_map.h"     // LazyMap, build_lazy_mapping, free_lazy_mapping, sweep_lazy_once
+#include "pmu.h"          // pmu_setup, pmu_rdpmc, PMU_EVT_L3MISS_USR (self-eviction experiment)
 
 #define HUGEPAGE_PATH_A "/dev/hugepages/map_A"
 #define MAPPING_FILE_A  "mapping_A.bin"
@@ -84,6 +85,37 @@ static void mkdir_p(const char *path) {
 // True iff x is a power of two in [1, 64].
 static int is_pow2_le64(int x) {
     return x >= 1 && x <= 64 && (x & (x - 1)) == 0;
+}
+
+// Lazy-victim buffer size from JSMAP_BUF_MB (set by the runner). Returns the LLC-capacity
+// multiple for build_lazy_mapping (12 MB = 1x) and writes the dir suffix ("" at the 12 MB
+// default, "_24MB" etc. otherwise). Invalid / non-multiple-of-12 values fall back to 12 MB.
+static int lazy_buf_size(char *suffixOut, size_t suffixCap) {
+    int mb = 12;
+    const char *e = getenv("JSMAP_BUF_MB");
+    if (e && *e) {
+        int v = atoi(e);
+        if (v >= 12 && v % 12 == 0) mb = v;
+        else fprintf(stderr, "[cov] JSMAP_BUF_MB=%s invalid (need multiple of 12, >=12); using 12\n", e);
+    }
+    if (mb == 12) suffixOut[0] = '\0';
+    else snprintf(suffixOut, suffixCap, "_%dMB", mb);
+    return mb / 12;
+}
+
+// Decoy dose (env DECOY, jsmap eviction-strategy mode only; default 0 = off). Number of
+// random, disjoint-set lines touched (lfence-bounded) between each subcluster window of
+// sweep_lazy_evict -- see lazy_map.h/.c. 0 reproduces the plain evA{A}D{D}C{C} sweep exactly;
+// inert when the eviction-strategy sweep itself isn't active (plain pointer-chase mode).
+static int decoy_lines_from_env(void) {
+    const char *e = getenv("DECOY");
+    if (!e || !*e) return 0;
+    int v = atoi(e);
+    if (v < 0) {
+        fprintf(stderr, "[cov] DECOY=%s invalid (need >=0); using 0\n", e);
+        return 0;
+    }
+    return v;
 }
 
 // ---- tiny raw-socket HTTP POST to the Flask coordinator (no libcurl) ----
@@ -202,13 +234,13 @@ static inline int ev_active(int A, int D, int C) { return A > 1 || D > 1 || C > 
 // when A/D/C are non-identity). Everything else mirrors probe_set_native.
 static uint16_t probe_set_jsmap(l3pp_t l3, int setIdx, void *head, const LazyMap *m, int c,
                                 int passes, int accessesPerLine, int sameAddr, int buddyTouch,
-                                int A, int D, int C) {
+                                int A, int D, int C, const DecoyBuf *decoy, int decoyLines) {
     uint16_t res[4];
     l3_unmonitorall(l3);
     l3_monitor_manual(l3, setIdx, head);
     l3_bprobecount(l3, res);                                    // prime (backward warm)
     if (ev_active(A, D, C))
-        sweep_lazy_evict(m, c, A, D, C);                        // eviction-strategy access pattern
+        sweep_lazy_evict(m, c, A, D, C, decoy, decoyLines);      // eviction-strategy access pattern (+ optional decoy dose)
     else
         sweep_lazy_once(m, c, passes, accessesPerLine, sameAddr, buddyTouch); // JS pointer chase
     l3_probecount(l3, res);                                     // measure; res[0] = misses
@@ -458,7 +490,11 @@ static int run_native_experiment(int noc, int iterIdx, int shuffle) {
     //    comparison never overwrites the other:
     //      unshuffled -> data/coverage/native/NoC{nn}/{iter}.csv
     //      shuffled   -> data/coverage/native_shuffled/NoC{nn}/{iter}.csv
-    const char *baseDir = shuffle ? NATIVE_DATA_DIR "_shuffled" : NATIVE_DATA_DIR;
+    const char *nativeRoot = shuffle ? NATIVE_DATA_DIR "_shuffled" : NATIVE_DATA_DIR;
+    const char *prefSuf = getenv("PREF_SUFFIX");   // e.g. "_pref0x2" (adjacent-line off); set by run_coverage_native.sh
+    if (!prefSuf) prefSuf = "";
+    char baseDir[160];
+    snprintf(baseDir, sizeof(baseDir), "%s%s", nativeRoot, prefSuf);
     char dir[256], missPath[300];
     snprintf(dir, sizeof(dir), "%s/NoC%02d", baseDir, noc);
     mkdir_p(dir);
@@ -541,14 +577,35 @@ static int run_native_jsmap_experiment(int noc, int iterIdx, int shuffle,
     }
 
     // 2. Build the JS-faithful lazy-map victim in a fresh page-aligned mmap buffer.
+    //    Buffer size (JSMAP_BUF_MB, default 12) scales membership: sizeMult LLC capacities.
+    char mbSuffix[16];
+    int sizeMult = lazy_buf_size(mbSuffix, sizeof(mbSuffix));
     LazyMap map;
-    if (build_lazy_mapping(&map, noc, JS_LLC_SETS, JS_LLC_WAYS, shuffle)) {
+    if (build_lazy_mapping(&map, noc, JS_LLC_SETS, JS_LLC_WAYS, shuffle, sizeMult)) {
         fprintf(stderr, "Failed to build JS lazy mapping\n");
         return 1;
     }
     printf("[cov-jsmap] JS victim built (mmap %zu MB, pages %s, passes=%d, accesses/line=%d, mode=%s).\n",
            map.bytes / (1024 * 1024), shuffle ? "shuffled" : "in-order", passes, accessesPerLine,
            sameAddr ? "same-addr" : "words");
+
+    // Decoy dose (env DECOY, default 0): a small independent pool, sampled between every
+    // subcluster window of the eviction-strategy sweep. Pool is fixed at 1 MB (16384 distinct
+    // lines) regardless of DECOY -- plenty of headroom for any dose actually worth testing
+    // (a handful of lines up to a couple thousand) while the pool itself stays far under a
+    // single LLC capacity, so it can't meaningfully perturb the experiment just by existing.
+    int decoyLines = decoy_lines_from_env();
+    DecoyBuf decoy = {0};
+    if (decoyLines > 0) {
+        if (build_decoy(&decoy, 1024 * 1024)) {
+            fprintf(stderr, "Failed to build decoy pool\n");
+            free_lazy_mapping(&map);
+            l3_release(l3A);
+            return 1;
+        }
+        printf("[cov-jsmap] decoy dose: %d random line(s) between every subcluster window (pool=%d lines)\n",
+               decoyLines, decoy.numLines);
+    }
 
     int setsPerGroup = numSets / noc;
     printf("[cov-jsmap] numSets=%d assoc=%d NoC=%d iter=%d setsPerGroup=%d\n",
@@ -567,7 +624,7 @@ static int run_native_jsmap_experiment(int noc, int iterIdx, int shuffle,
     for (int c = 0; c < noc; c++) {
         uint16_t *row = &matrix[(size_t)c * numSets];
         for (int i = 0; i < numSets; i++) {
-            row[i] = e_setsA[i] ? probe_set_jsmap(l3A, i, e_setsA[i], &map, c, passes, accessesPerLine, sameAddr, buddyTouch, A, D, C) : 0;
+            row[i] = e_setsA[i] ? probe_set_jsmap(l3A, i, e_setsA[i], &map, c, passes, accessesPerLine, sameAddr, buddyTouch, A, D, C, &decoy, decoyLines) : 0;
         }
         int g = get_active_group(row, setsPerGroup, numSets, assoc);
         printf("[cov-jsmap] cluster %d -> dominant group %d\n", c, g);
@@ -581,7 +638,7 @@ static int run_native_jsmap_experiment(int noc, int iterIdx, int shuffle,
     uint64_t sweepCycles = UINT64_MAX;
     for (int r = 0; r < 5; r++) {
         uint64_t t0 = rdtscp64();
-        if (ev_active(A, D, C)) sweep_lazy_evict(&map, 0, A, D, C);
+        if (ev_active(A, D, C)) sweep_lazy_evict(&map, 0, A, D, C, &decoy, decoyLines);
         else                    sweep_lazy_once(&map, 0, passes, accessesPerLine, sameAddr, buddyTouch);
         uint64_t dt = rdtscp64() - t0;
         if (dt < sweepCycles) sweepCycles = dt;
@@ -596,17 +653,23 @@ static int run_native_jsmap_experiment(int noc, int iterIdx, int shuffle,
 
     // 5. Write outputs. Every jsmap run gets its OWN knob-tagged tree so it never collides with
     // the mapping_B real-eviction-set trees (native / native_shuffled) or with another knob combo:
-    //   shuffle=1 -> data/coverage/native_jsmap_shuffled_p{P}a{A}[_same][_buddy][_evA{A}D{D}C{C}]
-    //   shuffle=0 -> data/coverage/native_jsmap_p{P}a{A}[_same][_buddy][_evA{A}D{D}C{C}]
+    //   shuffle=1 -> data/coverage/native_jsmap_shuffled_p{P}a{A}[_same][_buddy][_evA{A}D{D}C{C}][_dK{K}]
+    //   shuffle=0 -> data/coverage/native_jsmap_p{P}a{A}[_same][_buddy][_evA{A}D{D}C{C}][_dK{K}]
     // "_same" = same-exact-address access pattern (vs different words); "_buddy" = 128B adjacent-line
     // reinforcement diagnostic; "_evA{A}D{D}C{C}" = Rowhammer.js eviction-strategy sweep (replaces the
-    // pointer chase; passes/accesses/same/buddy are inert in that mode).
+    // pointer chase; passes/accesses/same/buddy are inert in that mode); "_dK{K}" = decoy dose (env
+    // DECOY, K random disjoint-set lines lfence-bounded between every subcluster window; only active
+    // together with the eviction-strategy sweep -- inert otherwise).
     const char *root = shuffle ? DATA_DIR "/native_jsmap_shuffled" : DATA_DIR "/native_jsmap";
     char evsuf[32] = "";
     if (ev_active(A, D, C)) snprintf(evsuf, sizeof(evsuf), "_evA%dD%dC%d", A, D, C);
-    char baseDir[160];
-    snprintf(baseDir, sizeof(baseDir), "%s_p%da%d%s%s%s", root, passes, accessesPerLine,
-             sameAddr ? "_same" : "", buddyTouch ? "_buddy" : "", evsuf);
+    char decoySuf[16] = "";
+    if (decoyLines > 0) snprintf(decoySuf, sizeof(decoySuf), "_dK%d", decoyLines);
+    const char *prefSuf = getenv("PREF_SUFFIX");   // e.g. "_pref0x2" (adjacent-line off); set by run_coverage_native.sh
+    if (!prefSuf) prefSuf = "";
+    char baseDir[192];
+    snprintf(baseDir, sizeof(baseDir), "%s_p%da%d%s%s%s%s%s%s", root, passes, accessesPerLine,
+             sameAddr ? "_same" : "", buddyTouch ? "_buddy" : "", evsuf, decoySuf, prefSuf, mbSuffix);
     char dir[256], missPath[300];
     snprintf(dir, sizeof(dir), "%s/NoC%02d", baseDir, noc);
     mkdir_p(dir);
@@ -647,8 +710,109 @@ static int run_native_jsmap_experiment(int noc, int iterIdx, int shuffle,
     }
 
     free(matrix); free(baseline); free(pas);
+    free_decoy(&decoy);
     free_lazy_mapping(&map);
     l3_release(l3A);
+    return 0;
+}
+
+// -----------------------------------------------------------------------------
+// SELFEVICT experiment: direct hardware measurement of self-eviction, no attacker.
+// For each lazy cluster c we flush its lines, sweep it once to warm (bring its lines
+// into the LLC), then measure the demand-load L3 misses on a SECOND sweep with the
+// programmable PMU counter (MEM_LOAD_RETIRED.L3_MISS, demand-only). If the sweep kept
+// its own lines resident, M_self ~= 0; if the scan-resistant L3 insertion policy makes
+// the cluster's same-set lines evict each other, M_self is large. The prediction (see
+// docs/FINDINGS_coverage_insertion_policy.md sec 2) is that M_self/nodeCount ~ 0 at low
+// NoC (prefetcher reinforcement) and rises toward NoC=64, tracking (1 - coverage).
+//
+// M_cold (the first, cold sweep of a freshly-flushed cluster) doubles as the counter
+// sanity check: every line misses, so M_cold ~= nodeCount, proving the counter is live
+// and correctly scaled. warmPasses>1 adds warm-up sweeps before the measured pass, which
+// should drive M_self down (the sec 4 continuous-hammer steady-state recovery).
+// -----------------------------------------------------------------------------
+static int run_selfevict_experiment(int noc, int iterIdx, int shuffle, int warmPasses) {
+    pin_to_core(PROBER_CORE);                 // counter is programmed on this same core
+    if (shuffle) srand((unsigned)(iterIdx + 1));
+
+    // Program PMC0 on the prober core to count demand-load L3 misses (user mode only).
+    pmu_setup(PROBER_CORE, 0, PMU_EVT_L3MISS_USR);
+
+    char mbSuffix[16];
+    int sizeMult = lazy_buf_size(mbSuffix, sizeof(mbSuffix));   // JSMAP_BUF_MB (default 12)
+    LazyMap map;
+    if (build_lazy_mapping(&map, noc, JS_LLC_SETS, JS_LLC_WAYS, shuffle, sizeMult)) {
+        fprintf(stderr, "Failed to build JS lazy mapping\n");
+        return 1;
+    }
+    printf("[cov-selfevict] JS victim built (mmap %zu MB, pages %s, warmPasses=%d).\n",
+           map.bytes / (1024 * 1024), shuffle ? "shuffled" : "in-order", warmPasses);
+    printf("[cov-selfevict] NoC=%d iter=%d: per-cluster flush -> %d warm sweep(s) -> measured sweep.\n",
+           noc, iterIdx, warmPasses);
+
+    uint64_t *nodeCount = calloc((size_t)noc, sizeof(uint64_t));
+    uint64_t *mCold     = calloc((size_t)noc, sizeof(uint64_t));
+    uint64_t *mSelf     = calloc((size_t)noc, sizeof(uint64_t));
+
+    for (int c = 0; c < noc; c++) {
+        flush_lazy_cluster(&map, c);                           // cold start
+
+        // Pass 1 (cold): all lines miss -> M_cold ~= nodeCount (counter sanity).
+        uint64_t b = pmu_rdpmc(0);
+        sweep_lazy_once(&map, c, 1, 1, 0, 0);
+        mCold[c] = pmu_rdpmc(0) - b;
+
+        // Additional warm-up sweeps (warmPasses counts warm sweeps incl. the cold one).
+        for (int w = 1; w < warmPasses; w++)
+            sweep_lazy_once(&map, c, 1, 1, 0, 0);
+
+        // Measured pass: misses here = lines the prior sweep(s) failed to keep resident
+        // = self-evicted lines.
+        b = pmu_rdpmc(0);
+        sweep_lazy_once(&map, c, 1, 1, 0, 0);
+        mSelf[c] = pmu_rdpmc(0) - b;
+
+        nodeCount[c] = (uint64_t)map.nodeCounts[c];
+    }
+
+    // Aggregate: mean self-eviction fraction over clusters.
+    double sumFrac = 0.0, sumColdFrac = 0.0;
+    for (int c = 0; c < noc; c++) {
+        if (nodeCount[c]) {
+            sumFrac     += (double)mSelf[c] / (double)nodeCount[c];
+            sumColdFrac += (double)mCold[c] / (double)nodeCount[c];
+        }
+    }
+    printf("[cov-selfevict] NoC=%d mean M_cold/node=%.3f (sanity ~1.0) mean M_self/node=%.3f\n",
+           noc, sumColdFrac / noc, sumFrac / noc);
+
+    // Write outputs: shuffled and unshuffled to separate trees, mirroring the jsmap paths.
+    // Tag with the prefetcher mask (PREF_SUFFIX, set by run_selfevict.sh) and buffer size, so
+    // selfevict trees are auto-named selfevict_shuffled_pref0x<v>[_NMB].
+    const char *sroot = shuffle ? DATA_DIR "/selfevict_shuffled" : DATA_DIR "/selfevict";
+    const char *prefSuf = getenv("PREF_SUFFIX");
+    if (!prefSuf) prefSuf = "";
+    char baseDir[176];
+    snprintf(baseDir, sizeof(baseDir), "%s%s%s", sroot, prefSuf, mbSuffix);
+    char dir[256], outPath[300];
+    snprintf(dir, sizeof(dir), "%s/NoC%02d", baseDir, noc);
+    mkdir_p(dir);
+    snprintf(outPath, sizeof(outPath), "%s/%03d.csv", dir, iterIdx);
+
+    FILE *fo = fopen(outPath, "w");
+    if (fo) {
+        fprintf(fo, "cluster,nodeCount,M_cold,M_self\n");
+        for (int c = 0; c < noc; c++)
+            fprintf(fo, "%d,%lu,%lu,%lu\n", c,
+                    (unsigned long)nodeCount[c], (unsigned long)mCold[c], (unsigned long)mSelf[c]);
+        fclose(fo);
+        printf("[cov-selfevict] wrote %s (%d clusters)\n", outPath, noc);
+    } else {
+        perror("fopen selfevict csv");
+    }
+
+    free(nodeCount); free(mCold); free(mSelf);
+    free_lazy_mapping(&map);
     return 0;
 }
 
@@ -666,8 +830,11 @@ int main(int argc, char **argv) {
     //            argv[9..11]=eviction-strategy params A D C (default 1 1 1 = off): when any >1,
     //            the victim uses the Rowhammer.js sliding-window sweep (sweep_lazy_evict) instead
     //            of the pointer chase, and passes/accesses/same/buddy become inert.
+    //            Env DECOY (jsmap, eviction-strategy mode only; default 0 = off): number of
+    //            random disjoint-set lines lfence-bounded between every subcluster window (see
+    //            lazy_map.h sweep_lazy_evict); inert unless the eviction-strategy sweep is active.
     //            Every jsmap run writes its own knob-tagged tree, e.g.
-    //            native_jsmap_shuffled_p1a3_buddy or native_jsmap_shuffled_p1a1_evA2D4C1.
+    //            native_jsmap_shuffled_p1a3_buddy or native_jsmap_shuffled_p1a1_evA2D4C1_dK128.
     int noc     = (argc > 1) ? atoi(argv[1]) : DEFAULT_NOC;
     int iterIdx = (argc > 2) ? atoi(argv[2]) : 0;
     const char *mode = (argc > 3) ? argv[3] : "browser";
@@ -702,8 +869,17 @@ int main(int argc, char **argv) {
         if (!sameAddr && accessesPerLine > JS_ELEMS_PER_LINE) accessesPerLine = JS_ELEMS_PER_LINE;
         return run_native_jsmap_experiment(noc, iterIdx, shuffle, passes, accessesPerLine, sameAddr, buddyTouch, A, D, C);
     }
+    if (strcmp(mode, "selfevict") == 0) {
+        // Direct PMU self-eviction measurement (no attacker). argv[4]="shuffle" for the
+        // JS-faithful page-shuffled victim (default = in-order). argv[5]=warmPasses (warm
+        // sweeps incl. the cold one before the measured pass; default 1 = measure pass 2).
+        int shuffle    = (argc > 4) && strcmp(argv[4], "shuffle") == 0;
+        int warmPasses = (argc > 5) ? atoi(argv[5]) : 1;
+        if (warmPasses < 1) warmPasses = 1;
+        return run_selfevict_experiment(noc, iterIdx, shuffle, warmPasses);
+    }
     if (strcmp(mode, "browser") != 0) {
-        fprintf(stderr, "Unknown mode '%s' (use 'browser', 'native', or 'jsmap')\n", mode);
+        fprintf(stderr, "Unknown mode '%s' (use 'browser', 'native', 'jsmap', or 'selfevict')\n", mode);
         return 1;
     }
 

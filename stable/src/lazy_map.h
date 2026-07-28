@@ -33,7 +33,8 @@ typedef struct {
 
 // Port of JS LazyMapping.build(). When shufflePages is 0 the pages are used in order
 // (strided; prefetch A/B). Returns 0 on success.
-int build_lazy_mapping(LazyMap *m, int noc, int llcSets, int llcWays, int shufflePages);
+// sizeMult scales the mmap buffer to sizeMult LLC capacities (1 = 12 MB = mean 12 lines/set).
+int build_lazy_mapping(LazyMap *m, int noc, int llcSets, int llcWays, int shufflePages, int sizeMult);
 
 void free_lazy_mapping(LazyMap *m);
 
@@ -46,6 +47,23 @@ void free_lazy_mapping(LazyMap *m);
 void sweep_lazy_once(const LazyMap *m, int c, int passes, int accessesPerLine, int sameAddr,
                      int buddyTouch);
 
+// ---- minimal decoy scratch pool (between-subcluster-window causality test) ----
+// A small, independent buffer sharing no pages with the victim/prober buffers. Used by
+// sweep_lazy_evict to inject a controllable, disjoint-set "dose" of unrelated demand
+// accesses between the sliding-window sweep's subcluster bursts. Because the decoy lines
+// are on a completely separate allocation, they cannot alias the monitored real set by
+// construction -- any resulting change in coverage can't be direct/local interference, only
+// a cache-wide replacement-state effect (e.g. DRRIP-style leader-set dueling).
+typedef struct {
+    uint32_t *buf;      // mmap'd scratch buffer (uint32 elements, like LazyMap.buf)
+    int       numLines; // distinct 64B lines available to sample from
+} DecoyBuf;
+
+// Allocate and fault in a `bytes`-sized decoy pool (faulted up front, outside any timed
+// region). Returns 0 on success.
+int  build_decoy(DecoyBuf *d, size_t bytes);
+void free_decoy(DecoyBuf *d);
+
 // Eviction-STRATEGY sweep of cluster c (coverage experiment only): a Rowhammer.js-style
 // sliding-window access pattern over clusterNodes[c] that aims to beat the L3 scan-resistant
 // insertion policy (promote our lines, demote/evict the victim's primed lines). Parameters
@@ -54,6 +72,20 @@ void sweep_lazy_once(const LazyMap *m, int c, int passes, int accessesPerLine, i
 //     for (s=0; s+D<=n; s+=C) for (a=0; a<A; a++) for (d=0; d<D; d++) touch(nodes[s+d]);
 // A=1,D=1,C=1 is exactly the single linear pass (identity). Uses indexed access (JS-portable to
 // a Uint32Array), NOT the pointer chase. Does not touch the timed fingerprinting sampler.
-void sweep_lazy_evict(const LazyMap *m, int c, int A, int D, int C);
+//
+// decoy/decoyLines (optional; NULL/0 = off, byte-for-byte the original behavior): after
+// EVERY window -- including the last, i.e. right before the caller's probe -- lfence (so the
+// window's loads fully retire), touch `decoyLines` random lines from `decoy`, lfence again
+// (so the decoy retires before the next window's loads can issue). Tests how much disjoint-set
+// "noise" between subcluster bursts is needed to move coverage, without assuming it has to be
+// large: decoyLines=0 reproduces the plain sweep_lazy_evict exactly.
+void sweep_lazy_evict(const LazyMap *m, int c, int A, int D, int C,
+                      const DecoyBuf *decoy, int decoyLines);
+
+// Flush every line of cluster c from all cache levels (clflush over clusterNodes[c]).
+// Used by the self-eviction PMU experiment to force a cold start before a warm/measured
+// sweep pair, so the measured pass's demand L3 misses reflect only the sweep's own
+// (self-)eviction, not stale residency from a prior cluster.
+void flush_lazy_cluster(const LazyMap *m, int c);
 
 #endif // LAZY_MAP_H

@@ -972,7 +972,7 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
     LazyMap jmap;
     memset(&jmap, 0, sizeof(jmap));
     if (use_jsmap) {
-        if (build_lazy_mapping(&jmap, NoC, l3_getSets(l3), l3_getAssociativity(l3), /*shufflePages=*/1)) {
+        if (build_lazy_mapping(&jmap, NoC, l3_getSets(l3), l3_getAssociativity(l3), /*shufflePages=*/1, /*sizeMult=*/1)) {
             fprintf(stderr, "Failed to build JS lazy mapping\n");
             l3_release(l3);
             return 1;

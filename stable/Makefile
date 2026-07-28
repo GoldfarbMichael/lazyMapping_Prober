@@ -28,7 +28,7 @@ TARGET = MastikElite
 # Coverage validator (cross-process P+P against the JS lazy mapping).
 # Reuses every non-main object (utils/tests/mastikElite/murmur3) + its own main.
 COV_TARGET = CoverageValidator
-COV_SRCS = src/coverage_validator.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c src/lazy_map.c
+COV_SRCS = src/coverage_validator.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c src/lazy_map.c src/pmu.c
 COV_OBJS = $(COV_SRCS:.c=.o)
 
 # Fingerprint orchestrator (real-browser Stage 3: drives Chrome JS sampling + stress-ng).

@@ -19,6 +19,7 @@
 #include <sys/mman.h>   // mmap
 #include <math.h>       // log2, round
 
+#include <mastik/low.h> // clflush
 #include "utils.h"      // maccessMy
 #include "lazy_map.h"
 
@@ -33,11 +34,14 @@ static void shuffle_int(int *a, int n) {
 }
 
 // Port of JS LazyMapping.build(). When shufflePages is 0 the pages are used in order
-// (strided; prefetch A/B). Returns 0 on success.
-int build_lazy_mapping(LazyMap *m, int noc, int llcSets, int llcWays, int shufflePages) {
+// (strided; prefetch A/B). sizeMult scales the mmap buffer to sizeMult LLC capacities
+// (1 = 12 MB = mean 12 lines/set; 2 = 24 MB = mean 24, ...), for the membership sweep.
+// Returns 0 on success.
+int build_lazy_mapping(LazyMap *m, int noc, int llcSets, int llcWays, int shufflePages, int sizeMult) {
+    if (sizeMult < 1) sizeMult = 1;
     memset(m, 0, sizeof(*m));
     m->numClusters = noc;
-    m->bytes = (size_t)llcSets * llcWays * JS_BYTES_PER_LINE;
+    m->bytes = (size_t)sizeMult * llcSets * llcWays * JS_BYTES_PER_LINE;
 
     m->buf = mmap(NULL, m->bytes, PROT_READ | PROT_WRITE,
                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -47,7 +51,9 @@ int build_lazy_mapping(LazyMap *m, int noc, int llcSets, int llcWays, int shuffl
     const int shiftRight        = 12 - (int)round(log2((double)noc));
     const int andTarget         = noc - 1;
     const int evSetsPerBitValue = numPages / llcWays;
-    const int nodesPerCluster   = (llcSets * llcWays) / noc;
+    // Scales with the buffer: fill[cluster] reaches (JS_LINES_PER_PAGE/noc)*numPages =
+    // sizeMult*(llcSets*llcWays)/noc nodes, so clusterNodes[c] must be sized to match.
+    const int nodesPerCluster   = (int)((size_t)sizeMult * llcSets * llcWays / noc);
 
     m->heads      = malloc((size_t)noc * sizeof(uint32_t));
     m->nodeCounts = malloc((size_t)noc * sizeof(int));
@@ -139,11 +145,31 @@ void sweep_lazy_once(const LazyMap *m, int c, int passes, int accessesPerLine,
     g_lazy_sink = curr + (uint32_t)sink;
 }
 
+// lfence() comes from mastik/low.h (already included above).
+
+// Allocate + fault in a decoy scratch pool (see lazy_map.h). Independent mmap, so it shares
+// no virtual or physical pages with the victim buffer or the Mastik prober's eviction sets.
+int build_decoy(DecoyBuf *d, size_t bytes) {
+    d->buf = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (d->buf == MAP_FAILED) { perror("mmap decoy buffer"); d->buf = NULL; d->numLines = 0; return 1; }
+    d->numLines = (int)(bytes / JS_BYTES_PER_LINE);
+    for (int i = 0; i < d->numLines; i++)          // fault every line in now, outside any timed region
+        d->buf[(size_t)i * JS_ELEMS_PER_LINE] = 0;
+    return 0;
+}
+
+void free_decoy(DecoyBuf *d) {
+    if (d->buf) munmap(d->buf, (size_t)d->numLines * JS_BYTES_PER_LINE);
+    d->buf = NULL; d->numLines = 0;
+}
+
 // Rowhammer.js-style sliding-window eviction strategy over cluster c's retained node array.
-// See lazy_map.h for parameter semantics. A=D=C=1 is the identity single linear pass. Indexed
-// access (buf[nodes[idx]]) rather than the pointer chase, so the pattern is exactly what a JS
-// Uint32Array victim would run. sink feeds g_lazy_sink to prevent dead-code elimination.
-void sweep_lazy_evict(const LazyMap *m, int c, int A, int D, int C) {
+// See lazy_map.h for parameter semantics (incl. the decoy dose). A=D=C=1 is the identity
+// single linear pass. Indexed access (buf[nodes[idx]]) rather than the pointer chase, so the
+// pattern is exactly what a JS Uint32Array victim would run. sink feeds g_lazy_sink to
+// prevent dead-code elimination.
+void sweep_lazy_evict(const LazyMap *m, int c, int A, int D, int C,
+                      const DecoyBuf *decoy, int decoyLines) {
     const uint32_t *buf   = m->buf;
     const uint32_t *nodes = m->clusterNodes[c];
     int n = m->nodeCounts[c];
@@ -151,10 +177,32 @@ void sweep_lazy_evict(const LazyMap *m, int c, int A, int D, int C) {
     if (C < 1) C = 1;
     if (D < 1) D = 1;
     if (D > n) D = n;                       // window can't exceed the cluster
+    int doDecoy = decoy && decoy->buf && decoyLines > 0;
     uint64_t sink = 0;
-    for (int s = 0; s + D <= n; s += C)     // slide window of D, step C
+    for (int s = 0; s + D <= n; s += C) {   // slide window of D, step C
         for (int a = 0; a < A; a++)         // hammer the window A times
             for (int d = 0; d < D; d++)     // ... over its D lines
                 sink += buf[nodes[s + d]];
+        if (doDecoy) {
+            lfence();                                          // this window's loads fully retire first
+            for (int k = 0; k < decoyLines; k++) {
+                int idx = rand() % decoy->numLines;             // disjoint pool -> can't alias the real set
+                sink += decoy->buf[(size_t)idx * JS_ELEMS_PER_LINE];
+            }
+            lfence();                                          // decoy retires before the next window issues
+        }
+    }
     g_lazy_sink += (uint32_t)sink;
+}
+
+// Flush every line of cluster c (clflush over the retained node array). Each node is a
+// 32-bit ELEMENT index into buf; &buf[node] is the line head (nodes are line-aligned by
+// build_lazy_mapping). mfence after so the flushes retire before the caller re-touches.
+void flush_lazy_cluster(const LazyMap *m, int c) {
+    uint32_t *buf         = m->buf;
+    const uint32_t *nodes = m->clusterNodes[c];
+    int n = m->nodeCounts[c];
+    for (int i = 0; i < n; i++)
+        clflush((void *)(buf + nodes[i]));
+    mfence();
 }
