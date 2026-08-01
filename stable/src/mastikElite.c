@@ -651,8 +651,25 @@ void get_spatioTemporal_memoryGram_ChromeMock(Clusters_t *Clusters, int NoC, uin
 
 
 
+// One chase step over a LazyMap cluster ring, shared by BOTH jsmap samplers (mock + native clock).
+// Requires these locals in scope: const uint32_t *buf; register uint32_t curr, bcurr; register int
+// dir, lap; int n; int bidir. Forward (dir==0) chases the element-0 link chain (curr = buf[curr]);
+// backward (dir==1) chases the element-2 chain (built by build_lazy_backlinks), re-touching the
+// SAME 64B lines in reverse so a weakly scan-inserted victim line gets a promoting HIT (RRPV->near)
+// -- the mechanism that spikes lazy-map coverage. Direction flips every full ring (n steps). When
+// bidir==0 the flip is disabled -> a pure forward sweep, byte-for-byte the old behavior. Kept as a
+// macro (not an inline fn) so curr/bcurr/dir/lap stay in registers under -O0 and the hot loop stays
+// tight; that keeps forward-only (bidir==0) at its original cost and avoids confounding the A/B.
+#define LAZYMAP_CHASE_STEP()                              \
+    do {                                                  \
+        if (dir == 0) curr  = buf[curr];                  \
+        else          bcurr = buf[bcurr];                 \
+        if (bidir && ++lap == n) { dir ^= 1; lap = 0; }   \
+    } while (0)
+
 /**
- * Chrome-mock-clock spatio-temporal sampler for the JS-STYLE lazy-map victim (timer_mode==2).
+ * Chrome-mock-clock spatio-temporal sampler for the JS-STYLE lazy-map victim (timer_mode==2, and
+ * timer_mode==4 when bidir==1).
  *
  * Structurally identical to get_spatioTemporal_memoryGram_ChromeMock (same SST_us window,
  * same ACCESSES_TILL_TIMER_POLL batched chrome_mock_timer polling, same CSV writer), but the
@@ -669,8 +686,11 @@ void get_spatioTemporal_memoryGram_ChromeMock(Clusters_t *Clusters, int NoC, uin
  * @param K     Accesses between mock-clock polls. K > 0 = fixed cadence (poll every K accesses);
  *              K == 0 = dynamic-K (adaptive batch, ~5-9 polls/quantum) mirroring JS
  *              sweepClusterDynamicK. Comes from the config label's K field.
+ * @param bidir 0 = forward-only sweep (today's behavior). 1 = bidirectional (Mastik double-sided):
+ *              alternate a full forward ring then a full backward ring for the whole quantum, so
+ *              the victim's lines are promoted and durably reside. Requires build_lazy_backlinks(m).
  */
-void get_spatioTemporal_memoryGram_ChromeMock_jsmap(LazyMap *m, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename, int K){
+void get_spatioTemporal_memoryGram_ChromeMock_jsmap(LazyMap *m, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename, int K, int bidir){
     if (!m || !m->buf) {
         fprintf(stderr, "FATAL: LazyMap is NULL/unbuilt.\n");
         return;
@@ -696,7 +716,10 @@ void get_spatioTemporal_memoryGram_ChromeMock_jsmap(LazyMap *m, int NoC, uint64_
 
             const uint32_t *buf = m->buf;
             register uint32_t curr = m->heads[c];
+            register uint32_t bcurr = m->heads[c] + 2;  // backward cursor (element-2 chain); used iff bidir
+            register int dir = 0, lap = 0;               // sweep direction + steps into the current ring
             register uint32_t count = 0;
+            int n = m->nodeCounts[c];                    // ring length; direction flips every n steps
 
             // Set the timer constraint for this cluster
             uint64_t start_cluster = chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed);
@@ -706,7 +729,7 @@ void get_spatioTemporal_memoryGram_ChromeMock_jsmap(LazyMap *m, int NoC, uint64_
                 // FIXED-K: poll the mock clock every K accesses (K from the config label).
                 int check_count = 0;
                 while (1) {
-                    curr = buf[curr];   // JS index chase: the access AND the next-node link
+                    LAZYMAP_CHASE_STEP();   // fwd (curr=buf[curr]) or bwd (bcurr=buf[bcurr]); flips every ring if bidir
                     count++;
                     if (++check_count == K) {
                         if (chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed) >= end_cluster) {
@@ -722,7 +745,7 @@ void get_spatioTemporal_memoryGram_ChromeMock_jsmap(LazyMap *m, int NoC, uint64_
                 uint64_t prev = start_cluster;
                 uint32_t k = initialK;
                 for (;;) {
-                    for (uint32_t i = 0; i < k; i++) curr = buf[curr];  // hot chase, no timer poll
+                    for (uint32_t i = 0; i < k; i++) LAZYMAP_CHASE_STEP();  // hot chase, no timer poll
                     count += k;
                     uint64_t now = chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed);
                     if (now >= end_cluster) break;
@@ -790,8 +813,11 @@ void get_spatioTemporal_memoryGram_ChromeMock_jsmap(LazyMap *m, int NoC, uint64_
  * @param filename Output CSV path.
  * @param K     Accesses between clock polls. K > 0 = fixed cadence; K == 0 = dynamic-K (adaptive
  *              batch) mirroring JS sweepClusterDynamicK. Comes from the config label's K field.
+ * @param bidir 0 = forward-only (today's behavior, timer_mode==3). 1 = bidirectional (Mastik
+ *              double-sided, timer_mode==5): alternate fwd/bwd rings for the whole quantum so the
+ *              victim's lines are promoted and durably reside. Requires build_lazy_backlinks(m).
  */
-void get_spatioTemporal_memoryGram_jsmap(LazyMap *m, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename, int K){
+void get_spatioTemporal_memoryGram_jsmap(LazyMap *m, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename, int K, int bidir){
     if (!m || !m->buf) {
         fprintf(stderr, "FATAL: LazyMap is NULL/unbuilt.\n");
         return;
@@ -816,7 +842,10 @@ void get_spatioTemporal_memoryGram_jsmap(LazyMap *m, int NoC, uint64_t TST_cycle
 
             const uint32_t *buf = m->buf;
             register uint32_t curr = m->heads[c];
+            register uint32_t bcurr = m->heads[c] + 2;  // backward cursor (element-2 chain); used iff bidir
+            register int dir = 0, lap = 0;               // sweep direction + steps into the current ring
             register uint32_t count = 0;
+            int n = m->nodeCounts[c];                    // ring length; direction flips every n steps
 
             // Set the timer constraint for this cluster (cycles throughout)
             uint64_t start_cluster = rdtscp64();
@@ -826,7 +855,7 @@ void get_spatioTemporal_memoryGram_jsmap(LazyMap *m, int NoC, uint64_t TST_cycle
                 // FIXED-K: poll the clock every K accesses (K from the config label).
                 int check_count = 0;
                 while (1) {
-                    curr = buf[curr];   // JS index chase: the access AND the next-node link
+                    LAZYMAP_CHASE_STEP();   // fwd (curr=buf[curr]) or bwd (bcurr=buf[bcurr]); flips every ring if bidir
                     count++;
                     if (++check_count == K) {
                         if (rdtscp64() >= end_cluster) {
@@ -844,7 +873,7 @@ void get_spatioTemporal_memoryGram_jsmap(LazyMap *m, int NoC, uint64_t TST_cycle
                 uint64_t prev = start_cluster;
                 uint32_t k = initialK;
                 for (;;) {
-                    for (uint32_t i = 0; i < k; i++) curr = buf[curr];  // hot chase, no timer poll
+                    for (uint32_t i = 0; i < k; i++) LAZYMAP_CHASE_STEP();  // hot chase, no timer poll
                     count += k;
                     uint64_t now = rdtscp64();
                     if (now >= end_cluster) break;
@@ -894,14 +923,17 @@ void get_spatioTemporal_memoryGram_jsmap(LazyMap *m, int NoC, uint64_t TST_cycle
 
 
 // Output-tree subdir for a timer_mode: 0=native clock (Mastik e_sets), 1=Chrome mock clock
-// (Mastik e_sets), 2=Chrome mock clock (JS-style lazy map), 3=native clock (JS-style lazy map).
+// (Mastik e_sets), 2=Chrome mock clock (JS-style lazy map), 3=native clock (JS-style lazy map),
+// 4=Chrome mock clock (JS lazy map, BIDIRECTIONAL), 5=native clock (JS lazy map, BIDIRECTIONAL).
 // Keeps each victim/clock combination in a distinct tree so previously collected data is never
-// touched.
+// touched (the bidir modes get their own tree = the A/B baseline vs the forward-only 2/3 trees).
 static const char* timer_mode_subdir(int timer_mode) {
     switch (timer_mode) {
         case 1:  return "chrome_clock";
         case 2:  return "chrome_clock_jsmap";
         case 3:  return "native_clock_jsmap";
+        case 4:  return "chrome_clock_jsmap_bidir";
+        case 5:  return "native_clock_jsmap_bidir";
         default: return "native_clock";
     }
 }
@@ -943,7 +975,7 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
     // 500us floor (JS MIN_QUANTUM_MS): applied ONLY to the Chrome-mock-clock modes (1 Mastik
     // e_sets, 2 JS-style lazy map), where the clock's 100us clamp makes a sub-500us quantum
     // meaningless. The native-clock modes (0 and 3) have cycle resolution and stay unfloored.
-    if (timer_mode == 1 || timer_mode == 2) {
+    if (timer_mode == 1 || timer_mode == 2 || timer_mode == 4) {  // all mock-clock modes (4 = jsmap bidir)
         uint64_t min_SST_cycles_for_500us = (500 * g_tsc_freq_hz) / 1000000;
         if (SST_cycles < min_SST_cycles_for_500us) {
             printf("[TIMER_MODE=%d] SST_cycles adjusted: %lu -> %lu (minimum 500us window)\n", timer_mode, SST_cycles, min_SST_cycles_for_500us);
@@ -967,7 +999,9 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
     // lazy map (always shuffled pages), built in a fresh mmap buffer exactly as the browser
     // does. The loaded e_sets are unused for those modes, but l3 is still used above for
     // identical TST/SST sizing.
-    int use_jsmap = (timer_mode == 2 || timer_mode == 3);
+    // jsmap victim: forward-only (2 mock, 3 native) or bidirectional (4 mock, 5 native).
+    int use_jsmap = (timer_mode >= 2 && timer_mode <= 5);
+    int use_bidir = (timer_mode == 4 || timer_mode == 5);
     Clusters_t *Clusters = NULL;
     LazyMap jmap;
     memset(&jmap, 0, sizeof(jmap));
@@ -977,8 +1011,13 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
             l3_release(l3);
             return 1;
         }
-        printf("Built JS-style lazy map victim (mmap %zu MB, %d clusters, shuffled pages)\n",
-               jmap.bytes / (1024 * 1024), NoC);
+        // Bidirectional sweep needs the element-2 reverse chain built into each line.
+        if (use_bidir) {
+            build_lazy_backlinks(&jmap);
+            printf("Built backward chain (element-2) for bidirectional sweep\n");
+        }
+        printf("Built JS-style lazy map victim (mmap %zu MB, %d clusters, shuffled pages%s)\n",
+               jmap.bytes / (1024 * 1024), NoC, use_bidir ? ", bidirectional" : "");
     } else {
         Clusters = eviction_sets_to_Clusters(&e_sets, l3_getSets(l3), NoC);
         if (!Clusters) {
@@ -1070,14 +1109,20 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
                 case 1:  // Use chrome_mock_timer() with Mastik loaded-e_set clusters
                     get_spatioTemporal_memoryGram_ChromeMock(Clusters, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path);
                     break;
-                case 2:  // Use chrome_mock_timer() with the JS-style lazy-map victim (K=0 -> dynamic-K)
-                    get_spatioTemporal_memoryGram_ChromeMock_jsmap(&jmap, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path, K);
+                case 2:  // chrome_mock_timer() with the JS-style lazy-map victim, forward-only
+                    get_spatioTemporal_memoryGram_ChromeMock_jsmap(&jmap, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path, K, /*bidir=*/0);
                     break;
-                case 3:  // Use rdtscp64() with the JS-style lazy-map victim (K=0 -> dynamic-K)
-                    get_spatioTemporal_memoryGram_jsmap(&jmap, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path, K);
+                case 3:  // rdtscp64() with the JS-style lazy-map victim, forward-only
+                    get_spatioTemporal_memoryGram_jsmap(&jmap, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path, K, /*bidir=*/0);
+                    break;
+                case 4:  // chrome_mock_timer() with the JS-style lazy-map victim, BIDIRECTIONAL
+                    get_spatioTemporal_memoryGram_ChromeMock_jsmap(&jmap, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path, K, /*bidir=*/1);
+                    break;
+                case 5:  // rdtscp64() with the JS-style lazy-map victim, BIDIRECTIONAL
+                    get_spatioTemporal_memoryGram_jsmap(&jmap, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path, K, /*bidir=*/1);
                     break;
                 default:
-                    fprintf(stderr, "ERROR: Unknown timer_mode %d. Use 0 (rdtscp64), 1 (chrome mock), 2 (chrome mock + JS lazy map), or 3 (rdtscp64 + JS lazy map)\n", timer_mode);
+                    fprintf(stderr, "ERROR: Unknown timer_mode %d. Use 0 (native), 1 (chrome mock), 2/3 (chrome-mock/native + JS lazy map), or 4/5 (chrome-mock/native + JS lazy map BIDIRECTIONAL)\n", timer_mode);
                     kill(pid, SIGKILL);
                     waitpid(pid, NULL, 0);
                     return 1;

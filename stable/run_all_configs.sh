@@ -29,10 +29,12 @@ trap cleanup SIGINT SIGTERM
 # ============================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BATCH_RUNNER="$SCRIPT_DIR/batch_runner.sh"
-# TIMER_MODE="-c"  # Chrome timer (Mastik loaded-e_set clusters)
-# TIMER_MODE="-n"  # native timer
-# TIMER_MODE="-j"  # Chrome timer + JS-style lazy-map victim (data/chrome_clock_jsmap/...)
-TIMER_MODE="-jn" # Native timer + JS-style lazy-map victim (data/native_clock_jsmap/...)
+# TIMER_MODE="-c"   # Chrome timer (Mastik loaded-e_set clusters)
+# TIMER_MODE="-n"   # native timer
+# TIMER_MODE="-j"   # Chrome timer + JS-style lazy-map victim (data/chrome_clock_jsmap/...)
+# TIMER_MODE="-jn"  # Native timer + JS-style lazy-map victim (data/native_clock_jsmap/...)
+# TIMER_MODE="-jb"  # Chrome timer + JS lazy map BIDIRECTIONAL (data/chrome_clock_jsmap_bidir/...)
+TIMER_MODE="-jnb" # Native timer + JS lazy map BIDIRECTIONAL (data/native_clock_jsmap_bidir/...)
 # Shuffled-cluster A/B: set to "-s" WITH TIMER_MODE="-c" to line-shuffle the Mastik clusters
 # once -> data/chrome_clock_shuffled/. Empty (default) = normal contiguous clusters.
 SHUFFLE_FLAG="-s"
@@ -45,8 +47,9 @@ COOLDOWN_SECS=60
 LOG_DIR="$SCRIPT_DIR/batch_logs"
 
 # The jsmap victim shuffles its pages internally (build_lazy_mapping); -s is a Mastik-e_set-only
-# knob, so never forward a stale shuffle flag into a jsmap run.
-if [[ "$TIMER_MODE" == "-j" || "$TIMER_MODE" == "-jn" ]]; then
+# knob, so never forward a stale shuffle flag into any jsmap run (forward-only or bidirectional).
+if [[ "$TIMER_MODE" == "-j" || "$TIMER_MODE" == "-jn" \
+   || "$TIMER_MODE" == "-jb" || "$TIMER_MODE" == "-jnb" ]]; then
     SHUFFLE_FLAG=""
 fi
 

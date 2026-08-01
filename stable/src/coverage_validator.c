@@ -118,6 +118,18 @@ static int decoy_lines_from_env(void) {
     return v;
 }
 
+// Bidirectional victim sweep (env JSMAP_BIDIR==1; default off). Returns R = fwd+bwd oscillations
+// (env JSMAP_BIDIR_R, default 1) when active, else 0. See lazy_map.h sweep_lazy_bidir. Mutually
+// exclusive with the eviction-strategy sweep -- the caller gates it on !ev_active.
+static int bidir_reps_from_env(void) {
+    const char *b = getenv("JSMAP_BIDIR");
+    if (!b || atoi(b) != 1) return 0;               // off unless explicitly 1
+    const char *r = getenv("JSMAP_BIDIR_R");
+    int R = (r && *r) ? atoi(r) : 1;
+    if (R < 1) R = 1;
+    return R;
+}
+
 // ---- tiny raw-socket HTTP POST to the Flask coordinator (no libcurl) ----
 static int ctl_connect(void) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -234,13 +246,16 @@ static inline int ev_active(int A, int D, int C) { return A > 1 || D > 1 || C > 
 // when A/D/C are non-identity). Everything else mirrors probe_set_native.
 static uint16_t probe_set_jsmap(l3pp_t l3, int setIdx, void *head, const LazyMap *m, int c,
                                 int passes, int accessesPerLine, int sameAddr, int buddyTouch,
-                                int A, int D, int C, const DecoyBuf *decoy, int decoyLines) {
+                                int A, int D, int C, const DecoyBuf *decoy, int decoyLines,
+                                int bidirR) {
     uint16_t res[4];
     l3_unmonitorall(l3);
     l3_monitor_manual(l3, setIdx, head);
     l3_bprobecount(l3, res);                                    // prime (backward warm)
     if (ev_active(A, D, C))
         sweep_lazy_evict(m, c, A, D, C, decoy, decoyLines);      // eviction-strategy access pattern (+ optional decoy dose)
+    else if (bidirR > 0)
+        sweep_lazy_bidir(m, c, bidirR);                          // bidirectional (Mastik double-sided) sweep
     else
         sweep_lazy_once(m, c, passes, accessesPerLine, sameAddr, buddyTouch); // JS pointer chase
     l3_probecount(l3, res);                                     // measure; res[0] = misses
@@ -607,6 +622,16 @@ static int run_native_jsmap_experiment(int noc, int iterIdx, int shuffle,
                decoyLines, decoy.numLines);
     }
 
+    // Bidirectional (Mastik double-sided) victim sweep: mutually exclusive with the
+    // eviction-strategy sweep. When active, add the reverse pointer chain (element 2) so the
+    // sweep is a pure forward-then-backward pointer-chase with no auxiliary footprint.
+    int bidirR = ev_active(A, D, C) ? 0 : bidir_reps_from_env();
+    if (bidirR > 0) {
+        build_lazy_backlinks(&map);
+        printf("[cov-jsmap] bidirectional sweep: %d fwd+bwd oscillation(s)/probe (reverse re-access promotes victim lines)\n",
+               bidirR);
+    }
+
     int setsPerGroup = numSets / noc;
     printf("[cov-jsmap] numSets=%d assoc=%d NoC=%d iter=%d setsPerGroup=%d\n",
            numSets, assoc, noc, iterIdx, setsPerGroup);
@@ -624,7 +649,7 @@ static int run_native_jsmap_experiment(int noc, int iterIdx, int shuffle,
     for (int c = 0; c < noc; c++) {
         uint16_t *row = &matrix[(size_t)c * numSets];
         for (int i = 0; i < numSets; i++) {
-            row[i] = e_setsA[i] ? probe_set_jsmap(l3A, i, e_setsA[i], &map, c, passes, accessesPerLine, sameAddr, buddyTouch, A, D, C, &decoy, decoyLines) : 0;
+            row[i] = e_setsA[i] ? probe_set_jsmap(l3A, i, e_setsA[i], &map, c, passes, accessesPerLine, sameAddr, buddyTouch, A, D, C, &decoy, decoyLines, bidirR) : 0;
         }
         int g = get_active_group(row, setsPerGroup, numSets, assoc);
         printf("[cov-jsmap] cluster %d -> dominant group %d\n", c, g);
@@ -639,6 +664,7 @@ static int run_native_jsmap_experiment(int noc, int iterIdx, int shuffle,
     for (int r = 0; r < 5; r++) {
         uint64_t t0 = rdtscp64();
         if (ev_active(A, D, C)) sweep_lazy_evict(&map, 0, A, D, C, &decoy, decoyLines);
+        else if (bidirR > 0)    sweep_lazy_bidir(&map, 0, bidirR);
         else                    sweep_lazy_once(&map, 0, passes, accessesPerLine, sameAddr, buddyTouch);
         uint64_t dt = rdtscp64() - t0;
         if (dt < sweepCycles) sweepCycles = dt;
@@ -659,17 +685,21 @@ static int run_native_jsmap_experiment(int noc, int iterIdx, int shuffle,
     // reinforcement diagnostic; "_evA{A}D{D}C{C}" = Rowhammer.js eviction-strategy sweep (replaces the
     // pointer chase; passes/accesses/same/buddy are inert in that mode); "_dK{K}" = decoy dose (env
     // DECOY, K random disjoint-set lines lfence-bounded between every subcluster window; only active
-    // together with the eviction-strategy sweep -- inert otherwise).
+    // together with the eviction-strategy sweep -- inert otherwise); "_bidirR{R}" = bidirectional
+    // (Mastik double-sided) sweep (env JSMAP_BIDIR=1, R oscillations; replaces the pointer chase,
+    // mutually exclusive with the eviction-strategy sweep).
     const char *root = shuffle ? DATA_DIR "/native_jsmap_shuffled" : DATA_DIR "/native_jsmap";
     char evsuf[32] = "";
     if (ev_active(A, D, C)) snprintf(evsuf, sizeof(evsuf), "_evA%dD%dC%d", A, D, C);
     char decoySuf[16] = "";
     if (decoyLines > 0) snprintf(decoySuf, sizeof(decoySuf), "_dK%d", decoyLines);
+    char bidirSuf[16] = "";
+    if (bidirR > 0) snprintf(bidirSuf, sizeof(bidirSuf), "_bidirR%d", bidirR);
     const char *prefSuf = getenv("PREF_SUFFIX");   // e.g. "_pref0x2" (adjacent-line off); set by run_coverage_native.sh
     if (!prefSuf) prefSuf = "";
-    char baseDir[192];
-    snprintf(baseDir, sizeof(baseDir), "%s_p%da%d%s%s%s%s%s%s", root, passes, accessesPerLine,
-             sameAddr ? "_same" : "", buddyTouch ? "_buddy" : "", evsuf, decoySuf, prefSuf, mbSuffix);
+    char baseDir[208];
+    snprintf(baseDir, sizeof(baseDir), "%s_p%da%d%s%s%s%s%s%s%s", root, passes, accessesPerLine,
+             sameAddr ? "_same" : "", buddyTouch ? "_buddy" : "", evsuf, decoySuf, bidirSuf, prefSuf, mbSuffix);
     char dir[256], missPath[300];
     snprintf(dir, sizeof(dir), "%s/NoC%02d", baseDir, noc);
     mkdir_p(dir);
@@ -833,6 +863,9 @@ int main(int argc, char **argv) {
     //            Env DECOY (jsmap, eviction-strategy mode only; default 0 = off): number of
     //            random disjoint-set lines lfence-bounded between every subcluster window (see
     //            lazy_map.h sweep_lazy_evict); inert unless the eviction-strategy sweep is active.
+    //            Env JSMAP_BIDIR=1 + JSMAP_BIDIR_R (jsmap; default off): bidirectional
+    //            (Mastik double-sided) victim sweep -- forward then backward pointer-chase, R
+    //            oscillations (see lazy_map.h sweep_lazy_bidir); mutually exclusive with A/D/C.
     //            Every jsmap run writes its own knob-tagged tree, e.g.
     //            native_jsmap_shuffled_p1a3_buddy or native_jsmap_shuffled_p1a1_evA2D4C1_dK128.
     int noc     = (argc > 1) ? atoi(argv[1]) : DEFAULT_NOC;

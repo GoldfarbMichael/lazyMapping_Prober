@@ -82,6 +82,24 @@ void free_decoy(DecoyBuf *d);
 void sweep_lazy_evict(const LazyMap *m, int c, int A, int D, int C,
                       const DecoyBuf *decoy, int decoyLines);
 
+// Build the BACKWARD pointer chain for a bidirectional (Mastik double-sided) sweep. For every
+// line, writes a reverse link at element offset 2 (byte 8) -- inside the SAME 64B line as the
+// forward link at offset 0 -- so the victim can pointer-chase a cluster in reverse with ZERO
+// auxiliary footprint (no separate index array to stream). Chasing buf[node+2] visits the ring
+// in reverse order. Call ONCE after build_lazy_mapping, and ONLY when a bidirectional sweep will
+// run: it writes element 2, which the "words" access pattern (sweep_lazy_once, accessesPerLine>2)
+// would otherwise read. No extra memory -- reuses dead space in each already-allocated line.
+void build_lazy_backlinks(LazyMap *m);
+
+// Bidirectional (forward-then-backward) sweep of cluster c: chase the forward chain (element 0)
+// once around the ring, then the backward chain (element 2) once, repeating the pair R times.
+// The reverse return pass re-touches just-inserted lines at a short turnaround reuse distance,
+// converting a weak scan-resistant insert into a promoting HIT (RRPV->near) so the victim's own
+// lines can displace the primed incumbents. Same 2*R*n accesses as R forward+backward passes, but
+// the re-access ORDER is reversed vs a plain multi-pass (sweep_lazy_once, passes>1). Requires
+// build_lazy_backlinks() first. R>=1. Pure pointer-chase -> no auxiliary footprint.
+void sweep_lazy_bidir(const LazyMap *m, int c, int R);
+
 // Flush every line of cluster c from all cache levels (clflush over clusterNodes[c]).
 // Used by the self-eviction PMU experiment to force a cold start before a warm/measured
 // sweep pair, so the measured pass's demand L3 misses reflect only the sweep's own

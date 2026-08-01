@@ -66,6 +66,25 @@ def list_ev_trees():
                     m.group(4) or "0x0", int(m.group(5) or 12)))
     return out
 
+# Bidirectional (Mastik double-sided) victim sweep, auto-discovered:
+# native_jsmap_shuffled_p1a1_bidirR{R}[_pref0x<mask>][_<MB>MB]. The victim sweeps each cluster
+# forward (element-0 chain) then BACKWARD (element-2 chain, the SAME 64B lines in reverse), R
+# times. The reverse return pass re-touches each just-inserted line at short reuse distance ->
+# a promoting HIT (RRPV->near) that completes the eviction against scan-resistant insertion.
+BIDIR_RE = re.compile(r"_p1a1_bidirR(\d+)(?:_pref(0x[0-9a-fA-F]+))?(?:_(\d+)MB)?$")
+
+def list_bidir_trees():
+    """Return [(name, R, pref, mb), ...] for every bidirectional tree on disk."""
+    out = []
+    for p in sorted(DATA.glob("native_jsmap_shuffled_p1a1_bidirR*")):
+        if not p.is_dir():
+            continue
+        m = BIDIR_RE.search(p.name)
+        if not m:
+            continue
+        out.append((p.name, int(m.group(1)), m.group(2) or "0x0", int(m.group(3) or 12)))
+    return out
+
 # ---- metric functions copied verbatim from coverage_analysis.ipynb ----
 
 def load_miss_matrix(csv_path, noc):
@@ -447,6 +466,84 @@ def report_ev_grid(trees, base64, ceil_cont, ceil_shuf, title, rank_noc=64):
     print(grid_df.to_string(index=False, formatters=fmts, justify="right"))
     return rows
 
+# ---- bidirectional sweep: coverage + anti-fooling audit ----
+# The bidir sweep produces a LARGE low-NoC coverage spike (lazy 1-fwd-pass ~0.43 -> ~0.95 at NoC=8,
+# flat across NoC, matching the real-e-set ceiling). Because such a jump is exactly when a metric
+# artifact should be suspected, this section pairs the coverage grid with a specificity audit and a
+# matched-cost control, so the result defends itself:
+#   CONTROL p2a1 = 2 FORWARD passes = the SAME 2*n accesses and same pointer-chase as bidirR1, but
+#   re-accessed in the SAME order (long reuse). p2a1 ~= 1-pass, bidir spikes -> the lever is the
+#   reverse re-access ORDER, not the access COUNT or sweep duration.
+# The audit rules out the ways a spike could be manufactured:
+#   offdiag  (OFF-diagonal raw miss): a non-specific victim evicting EVERY cluster would push this
+#            up toward diag. Staying ~0 => the eviction is spatially specific (real signal).
+#   base     (idle noise floor, NO victim sweep): high => a saturated/noisy cache, not eviction.
+#   diagmass (trace/total of the baseline-subtracted matrix): 1.0 = perfectly spatial; ~1/noc =
+#            uniform (fake). High => the mass really is on the diagonal.
+BIDIR_CONTROL   = "native_jsmap_shuffled_p2a1_pref0xf"   # 2 fwd passes: matched-cost order control
+BIDIR_BASELINE  = "native_jsmap_shuffled_p3a1_pref0xf"   # plain multi-pass reference (still craters low-NoC)
+BIDIR_CEILING   = "native_shuffled_pref0xf"              # real e-sets (guaranteed 12/set), scattered
+
+def audit_specificity(tree, noc):
+    """Anti-fooling audit for one tree/NoC. Returns (diag, offdiag, base_idle, diagmass) averaged
+    over samples, or None. diag = mean diagonal raw miss (/ASSOC = coverage); offdiag = mean
+    OFF-diagonal raw miss (non-specific eviction = fake); base_idle = idle baseline raw miss (no
+    victim); diagmass = trace/total of the baseline-subtracted matrix (1.0 spatial, 1/noc uniform)."""
+    pc = phys_clusters_for(tree, noc)
+    csvs = select_csvs(DATA / tree / f"NoC{noc:02d}")
+    if pc is None or not csvs:
+        return None
+    diags, offs, bases, masses = [], [], [], []
+    for c in csvs:
+        cluster_rows, baseline_row = load_miss_matrix(c, noc)
+        raw = compute_aggregated_matrix(cluster_rows, pc, noc)
+        base = compute_baseline_vector(baseline_row, pc, noc)
+        sub = subtract_baseline(raw, base)
+        diags.append(float(np.diag(raw).mean()))
+        off = raw.copy(); np.fill_diagonal(off, 0.0)
+        offs.append(float(off.sum() / (noc * (noc - 1))) if noc > 1 else 0.0)
+        bases.append(float(base.mean()))
+        tot = sub.sum(); masses.append(0.0 if tot <= 0 else float(np.trace(sub) / tot))
+    return (float(np.mean(diags)), float(np.mean(offs)), float(np.mean(bases)), float(np.mean(masses)))
+
+def report_bidir(refcov):
+    trees = list_bidir_trees()
+    if not trees:
+        return
+    print("\n" + "=" * 84)
+    print("BIDIRECTIONAL (MASTIK DOUBLE-SIDED) VICTIM SWEEP  -- coverage vs matched-cost control")
+    print("  bidirR{R} = fwd(elem0) then bwd(elem2) x R.  CONTROL p2a1 = 2 FORWARD passes (same 2*n")
+    print("  accesses/same pointer-chase, SAME order) -> isolates re-access ORDER from access COUNT.")
+    print("=" * 84)
+    print(f"{'victim':<40}" + "".join(f"{'NoC'+str(n):>8}" for n in NOC_VALUES))
+
+    def line(label, tree):
+        r = cov_row(tree)
+        cells = "".join((f"{r[n]:>8.3f}" if r.get(n) is not None else f"{'--':>8}") for n in NOC_VALUES)
+        print(f"{label:<40}{cells}")
+
+    line("p3a1 (plain 3 fwd passes, reference)", BIDIR_BASELINE)
+    line("p2a1 CONTROL (2 fwd passes, same 2n)", BIDIR_CONTROL)
+    line("native_shuffled CEILING (real e-sets)", BIDIR_CEILING)
+    for name, R, pref, mb in sorted(trees, key=lambda x: x[1]):
+        tag = f"bidirR{R}" + ("" if pref == "0xf" else f" (pref{pref})") + ("" if mb == 12 else f" {mb}MB")
+        line(tag, name)
+
+    print("\n  ANTI-FOOLING AUDIT (is the spike REAL victim-specific eviction, or a metric artifact?)")
+    print("   diag = diagonal raw miss (/12 = coverage) | offdiag = OFF-diag raw miss (non-specific => fake)")
+    print("   base = idle noise floor, NO victim | diagmass = trace/total (1.0 spatial, 1/noc uniform => fake)")
+    audit = [("p2a1 control", BIDIR_CONTROL), ("native_shuffled ceiling", BIDIR_CEILING)]
+    audit += [(f"bidirR{R}", name) for name, R, pref, mb in sorted(trees, key=lambda x: x[1])
+              if pref == "0xf" and mb == 12]
+    print(f"{'tree':<28}{'NoC':>5}{'diag':>7}{'offdiag':>9}{'base':>7}{'diagmass':>10}{'1/noc':>7}")
+    for lbl, tree in audit:
+        for noc in NOC_VALUES:
+            a = audit_specificity(tree, noc)
+            if a is None:
+                continue
+            diag, off, base, mass = a
+            print(f"{lbl:<28}{noc:>5}{diag:>7.2f}{off:>9.2f}{base:>7.2f}{mass:>10.3f}{1.0/noc:>7.3f}")
+
 def main():
     # ---- 1. Control ladder: contiguous -> scattered real e-sets -> lazy baseline ----
     print("=" * 84)
@@ -522,6 +619,9 @@ def main():
                    refcov.get(NATIVE_SHUF_ALLOFF, {}).get(64),
                    "ROWHAMMER.JS EVICTION-STRATEGY SWEEP @ ALL PREFETCHERS OFF (0xf, 12MB), ranked by NoC=8",
                    rank_noc=8)
+
+    # ---- 9. Bidirectional (Mastik double-sided) victim sweep + anti-fooling audit ----
+    report_bidir(refcov)
 
 if __name__ == "__main__":
     main()

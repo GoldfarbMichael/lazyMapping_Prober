@@ -209,6 +209,12 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "-jn") == 0) {
             timer_mode = 3;  // Native rdtscp64 clock, JS-style lazy-map victim
             printf("[INFO] Timer Mode: Native rdtscp64 + JS-style lazy map (-jn)\n");
+        } else if (strcmp(argv[i], "-jb") == 0) {
+            timer_mode = 4;  // Chrome mock timer, JS-style lazy-map victim, BIDIRECTIONAL sweep
+            printf("[INFO] Timer Mode: Chrome Mock + JS-style lazy map BIDIRECTIONAL (-jb)\n");
+        } else if (strcmp(argv[i], "-jnb") == 0) {
+            timer_mode = 5;  // Native rdtscp64 clock, JS-style lazy-map victim, BIDIRECTIONAL sweep
+            printf("[INFO] Timer Mode: Native rdtscp64 + JS-style lazy map BIDIRECTIONAL (-jnb)\n");
         } else if (strcmp(argv[i], "-s") == 0) {
             shuffleClusters = 1;  // line-shuffle clusters once (only active with -c / timer_mode 1)
             printf("[INFO] Cluster shuffle: ON (-s; effective only with -c)\n");
@@ -250,6 +256,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "  -j              : Use Chrome mock timer with the JS-style lazy-map victim\n");
         fprintf(stderr, "  -jn             : Use native rdtscp64 timer with the JS-style lazy-map victim\n");
         fprintf(stderr, "                    (-> data/native_clock_jsmap/)\n");
+        fprintf(stderr, "  -jb             : -j + BIDIRECTIONAL (Mastik double-sided) sweep (-> data/chrome_clock_jsmap_bidir/)\n");
+        fprintf(stderr, "  -jnb            : -jn + BIDIRECTIONAL (Mastik double-sided) sweep (-> data/native_clock_jsmap_bidir/)\n");
         fprintf(stderr, "  -s              : Line-shuffle the Mastik clusters once (coverage->accuracy A/B; only with -c\n");
         fprintf(stderr, "                    -> data/chrome_clock_shuffled/)\n\n");
         fprintf(stderr, "Arguments:\n");

@@ -195,6 +195,38 @@ void sweep_lazy_evict(const LazyMap *m, int c, int A, int D, int C,
     g_lazy_sink += (uint32_t)sink;
 }
 
+// See lazy_map.h. Reverse link at element+2 (byte 8), inside the same 64B line as the forward
+// link at element 0. node_i's backward slot points to node_{i-1}'s backward slot, so a chase of
+// the element-2 chain visits the ring in reverse. Nodes are line-aligned (multiples of
+// JS_ELEMS_PER_LINE=16), so element+2 is always within the line and never collides with the
+// forward link (element 0) or the 128B buddy (element ^16, a different line).
+void build_lazy_backlinks(LazyMap *m) {
+    uint32_t *buf = m->buf;
+    for (int c = 0; c < m->numClusters; c++) {
+        int len = m->nodeCounts[c];
+        const uint32_t *nodes = m->clusterNodes[c];
+        for (int i = 0; i < len; i++)
+            buf[nodes[i] + 2] = nodes[(i - 1 + len) % len] + 2;  // node_i(+2) -> node_{i-1}(+2)
+    }
+}
+
+// See lazy_map.h. Pure pointer-chase, no index array: forward chain (element 0) once around the
+// ring, then backward chain (element 2) once, R times. buf[curr] is BOTH the demand touch of
+// line `curr` and the next pointer, so each step is one dependent load and one line access.
+void sweep_lazy_bidir(const LazyMap *m, int c, int R) {
+    const uint32_t *buf = m->buf;
+    int n = m->nodeCounts[c];
+    if (R < 1) R = 1;
+    uint64_t sink = 0;
+    for (int r = 0; r < R; r++) {
+        uint32_t curr = m->heads[c];                       // forward: element-0 chain
+        for (int i = 0; i < n; i++) { uint32_t nx = buf[curr]; sink += nx; curr = nx; }
+        uint32_t bcurr = m->heads[c] + 2;                  // backward: element-2 chain, same lines reversed
+        for (int i = 0; i < n; i++) { uint32_t nb = buf[bcurr]; sink += nb; bcurr = nb; }
+    }
+    g_lazy_sink += (uint32_t)sink;
+}
+
 // Flush every line of cluster c (clflush over the retained node array). Each node is a
 // 32-bit ELEMENT index into buf; &buf[node] is the line head (nodes are line-aligned by
 // build_lazy_mapping). mfence after so the flushes retire before the caller re-touches.

@@ -40,6 +40,13 @@
 # move coverage, without assuming it has to be MB-scale. Tagged _dK<DECOY>:
 #   EV_A=3 EV_D=3072 EV_C=3072 DECOY=128 ./run_coverage_native.sh 2 jsmap 8  -> ..._evA3D3072C3072_dK128/
 #
+# JSMAP_BIDIR (jsmap only, env, default 0 = off): 1 = bidirectional (Mastik double-sided) victim
+# sweep -- forward then backward pointer-chase over each cluster, re-touching just-inserted lines
+# to promote them (RRPV->near) against scan-resistant insertion. JSMAP_BIDIR_R (default 1) sets
+# the number of fwd+bwd oscillations. Mutually exclusive with EV_A/EV_D/EV_C. Tagged _bidirR<R>:
+#   JSMAP_BIDIR=1 ./run_coverage_native.sh 2 jsmap 8                 -> ..._bidirR1/
+#   JSMAP_BIDIR=1 JSMAP_BIDIR_R=2 ./run_coverage_native.sh 2 jsmap 8 -> ..._bidirR2/
+#
 # SHUFFLE (env, default 1 = shuffled/prefetch-defeating) toggles the victim traversal order
 # and picks the output tree, for BOTH modes:
 #   SHUFFLE=1 native -> data/coverage/native_shuffled ; jsmap -> data/coverage/native_shuffled_p{P}a{A}..
@@ -116,6 +123,10 @@ EV_A="${EV_A:-1}"; EV_D="${EV_D:-1}"; EV_C="${EV_C:-1}"
 # Decoy dose (jsmap, eviction-strategy mode only): random disjoint-set lines touched between
 # every subcluster window. Default 0 = off (byte-for-byte the original sweep_lazy_evict).
 DECOY="${DECOY:-0}"
+# Bidirectional (Mastik double-sided) victim sweep (jsmap): 1 = on, with JSMAP_BIDIR_R fwd+bwd
+# oscillations. Default off. Mutually exclusive with EV_A/EV_D/EV_C.
+JSMAP_BIDIR="${JSMAP_BIDIR:-0}"
+JSMAP_BIDIR_R="${JSMAP_BIDIR_R:-1}"
 if [ "$MODE" = "jsmap" ]; then
     if ! [[ "$JSMAP_PASSES" =~ ^[0-9]+$ ]] || [ "$JSMAP_PASSES" -lt 1 ] \
     || ! [[ "$JSMAP_ACCESSES" =~ ^[0-9]+$ ]] || [ "$JSMAP_ACCESSES" -lt 1 ]; then
@@ -135,6 +146,18 @@ if [ "$MODE" = "jsmap" ]; then
     if [ "$DECOY" -gt 0 ] && [ "$EV_A" -eq 1 ] && [ "$EV_D" -eq 1 ] && [ "$EV_C" -eq 1 ]; then
         echo "[native] WARNING: DECOY=$DECOY has no effect without EV_A/EV_D/EV_C (plain pointer-chase mode ignores it)" >&2
     fi
+    if [ "$JSMAP_BIDIR" != 0 ] && [ "$JSMAP_BIDIR" != 1 ]; then
+        echo "JSMAP_BIDIR must be 0 or 1, got '$JSMAP_BIDIR'" >&2
+        exit 2
+    fi
+    if ! [[ "$JSMAP_BIDIR_R" =~ ^[0-9]+$ ]] || [ "$JSMAP_BIDIR_R" -lt 1 ]; then
+        echo "JSMAP_BIDIR_R must be an integer >= 1, got '$JSMAP_BIDIR_R'" >&2
+        exit 2
+    fi
+    if [ "$JSMAP_BIDIR" = 1 ] && { [ "$EV_A" -gt 1 ] || [ "$EV_D" -gt 1 ] || [ "$EV_C" -gt 1 ]; }; then
+        echo "JSMAP_BIDIR=1 is mutually exclusive with EV_A/EV_D/EV_C (eviction-strategy sweep)" >&2
+        exit 2
+    fi
     if ! [[ "$JSMAP_BUF_MB" =~ ^[0-9]+$ ]] || [ "$JSMAP_BUF_MB" -lt 12 ] || [ $((JSMAP_BUF_MB % 12)) -ne 0 ]; then
         echo "JSMAP_BUF_MB must be a multiple of 12 (>=12), got '$JSMAP_BUF_MB'" >&2
         exit 2
@@ -150,6 +173,8 @@ else
 fi
 # Decoy dir suffix (only meaningful -- and only ever nonzero here -- alongside EV_ACTIVE).
 if [ "$DECOY" -gt 0 ]; then DECOY_SUFFIX="_dK${DECOY}"; else DECOY_SUFFIX=""; fi
+# Bidirectional dir suffix (mutually exclusive with EV_ACTIVE, enforced above).
+if [ "$JSMAP_BIDIR" = 1 ]; then BIDIR_SUFFIX="_bidirR${JSMAP_BIDIR_R}"; else BIDIR_SUFFIX=""; fi
 # Access pattern token forwarded to the C tool ("same" or "words"), and dir suffix.
 if [ "$JSMAP_SAME" = 1 ]; then JSMAP_PATTERN="same"; SAME_SUFFIX="_same"; else JSMAP_PATTERN="words"; SAME_SUFFIX=""; fi
 # Buddy-touch (128B adjacent-line reinforcement) token (argv[8]="buddy") and dir suffix.
@@ -185,14 +210,14 @@ PREF_SUFFIX="_pref0x${PREF_VAL}"
 # collides with the mapping_B native/native_shuffled trees. The _pref0x<val> tag is appended last.
 if [ "$MODE" = "jsmap" ]; then
     JSMAP_ROOT="$([ "$SHUFFLE" = 1 ] && echo native_jsmap_shuffled || echo native_jsmap)"
-    OUT_ROOT="data/coverage/${JSMAP_ROOT}_p${JSMAP_PASSES}a${JSMAP_ACCESSES}${SAME_SUFFIX}${BUDDY_SUFFIX}${EV_SUFFIX}${DECOY_SUFFIX}${PREF_SUFFIX}${MB_SUFFIX}"
+    OUT_ROOT="data/coverage/${JSMAP_ROOT}_p${JSMAP_PASSES}a${JSMAP_ACCESSES}${SAME_SUFFIX}${BUDDY_SUFFIX}${EV_SUFFIX}${DECOY_SUFFIX}${BIDIR_SUFFIX}${PREF_SUFFIX}${MB_SUFFIX}"
 else
     OUT_ROOT="data/coverage/$([ "$SHUFFLE" = 1 ] && echo native_shuffled || echo native)${PREF_SUFFIX}"
 fi
 
 # ALL_NOCS=(32 16 8 4 2 64)
-ALL_NOCS=(32 16 8 64)
-# ALL_NOCS=(32)
+# ALL_NOCS=(32 16 8 64)
+ALL_NOCS=(64)
 
 
 
@@ -237,6 +262,8 @@ if [ "$MODE" = "jsmap" ]; then
         DECOY_NOTE=""
         [ "$DECOY" -gt 0 ] && DECOY_NOTE=" + DECOY=$DECOY (random disjoint-set lines between every subcluster window)"
         echo "[native] mode: jsmap ($SHUFFLE_TOKEN, EVICTION-STRATEGY A=$EV_A D=$EV_D C=$EV_C -- passes/accesses/pattern inert)${DECOY_NOTE}   NoCs: ${NOCS[*]}   iterations each: $ITERS"
+    elif [ "$JSMAP_BIDIR" = 1 ]; then
+        echo "[native] mode: jsmap ($SHUFFLE_TOKEN, BIDIRECTIONAL fwd+bwd R=$JSMAP_BIDIR_R -- passes/accesses/pattern inert, buf=${JSMAP_BUF_MB}MB)   NoCs: ${NOCS[*]}   iterations each: $ITERS"
     else
         echo "[native] mode: jsmap ($SHUFFLE_TOKEN, passes=$JSMAP_PASSES accesses/line=$JSMAP_ACCESSES pattern=$JSMAP_PATTERN buddy=$JSMAP_BUDDY buf=${JSMAP_BUF_MB}MB)   NoCs: ${NOCS[*]}   iterations each: $ITERS"
     fi
@@ -268,9 +295,10 @@ for noc in "${NOCS[@]}"; do
         else
             run_cmd=(./CoverageValidator "$noc" "$i" native "$SHUFFLE_TOKEN")
         fi
-        # PREF_SUFFIX, JSMAP_BUF_MB and DECOY must reach the (sudo'd) binary, which builds the
-        # actual output path/buffer/decoy pool; sudo resets the env, so pass them explicitly.
-        if ! sudo env "PREF_SUFFIX=$PREF_SUFFIX" "JSMAP_BUF_MB=$JSMAP_BUF_MB" "DECOY=$DECOY" "${run_cmd[@]}"; then
+        # PREF_SUFFIX, JSMAP_BUF_MB, DECOY and JSMAP_BIDIR* must reach the (sudo'd) binary, which
+        # builds the actual output path/buffer/decoy pool/sweep mode; sudo resets the env.
+        if ! sudo env "PREF_SUFFIX=$PREF_SUFFIX" "JSMAP_BUF_MB=$JSMAP_BUF_MB" "DECOY=$DECOY" \
+                      "JSMAP_BIDIR=$JSMAP_BIDIR" "JSMAP_BIDIR_R=$JSMAP_BIDIR_R" "${run_cmd[@]}"; then
             echo "[native] WARNING: run failed (NoC=$noc iter=$i) -- continuing"
             fail=$((fail + 1))
         fi
