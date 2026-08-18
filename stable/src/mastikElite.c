@@ -214,6 +214,39 @@ int parse_K_from_dirname(const char *dirname) {
 }
 
 /**
+ * Parses the TST field (total sampling time, seconds) from a config dir name.
+ *
+ * Format: {NoC}C_{TST}TST_{K}K_{cycles}cycles, e.g. "16C_4TST_90K_2288cycles" -> 4.
+ * Until this parser existed the "{N}TST" field was purely decorative: the sampling window came
+ * from the TST_SEC compile-time constant, so a dir labelled 4TST could hold 2 s traces. Parsing
+ * it here puts TST on the same footing as NoC/K/cycles -- the label now truthfully describes
+ * every dimension of the sampling, and the output tree (data/<clock>/<label>/...) separates
+ * TST values automatically.
+ *
+ * Integer seconds only (the label carries no decimal point). A sub-second TST would need a
+ * different label encoding.
+ *
+ * @return the parsed seconds (> 0), or -1 if the field is absent/malformed. As with cycles,
+ *         0 is NOT valid (a zero-length trace is meaningless).
+ */
+int parse_TST_from_dirname(const char *dirname) {
+    if (!dirname) return -1;
+
+    const char *t_pos = strstr(dirname, "TST");
+    if (!t_pos || t_pos == dirname) return -1;
+
+    const char *num_end = t_pos - 1;
+    while (num_end >= dirname && isdigit((unsigned char)*num_end)) {
+        num_end--;
+    }
+    const char *num_start = num_end + 1;
+    if (num_start >= t_pos) return -1;   // no digits before "TST"
+
+    int tst = (int)strtol(num_start, NULL, 10);
+    return (tst > 0) ? tst : -1;
+}
+
+/**
  * Parses the cycles-per-address field from a config dir name.
  *
  * Format: {NoC}C_{TST}TST_{K}K_{CYCLES}cycles, e.g. "16C_2TST_90K_2288cycles" -> 2288.
@@ -927,15 +960,41 @@ void get_spatioTemporal_memoryGram_jsmap(LazyMap *m, int NoC, uint64_t TST_cycle
 // 4=Chrome mock clock (JS lazy map, BIDIRECTIONAL), 5=native clock (JS lazy map, BIDIRECTIONAL).
 // Keeps each victim/clock combination in a distinct tree so previously collected data is never
 // touched (the bidir modes get their own tree = the A/B baseline vs the forward-only 2/3 trees).
-static const char* timer_mode_subdir(int timer_mode) {
-    switch (timer_mode) {
-        case 1:  return "chrome_clock";
-        case 2:  return "chrome_clock_jsmap";
-        case 3:  return "native_clock_jsmap";
-        case 4:  return "chrome_clock_jsmap_bidir";
-        case 5:  return "native_clock_jsmap_bidir";
-        default: return "native_clock";
+// Victim buffer size for the jsmap modes (env JSMAP_BUF_MB, default 12 = one LLC = mean 12
+// lines/set). Must be a multiple of 12; 24 -> mean 24 lines/set. Returns the sizeMult passed to
+// build_lazy_mapping and writes the "_<N>MB" tree-name tag (empty at the 12 MB default).
+// Same contract as coverage_validator.c's lazy_buf_size, so the tree names line up.
+static int lazy_buf_size(char *suffixOut, size_t suffixCap) {
+    int mb = 12;
+    const char *e = getenv("JSMAP_BUF_MB");
+    if (e && *e) {
+        int v = atoi(e);
+        if (v >= 12 && v % 12 == 0) mb = v;
+        else fprintf(stderr, "[elite] JSMAP_BUF_MB=%s invalid (need multiple of 12, >=12); using 12\n", e);
     }
+    if (mb == 12) suffixOut[0] = '\0';
+    else snprintf(suffixOut, suffixCap, "_%dMB", mb);
+    return mb / 12;
+}
+
+static const char* timer_mode_subdir(int timer_mode) {
+    // Non-default buffer sizes get their own tree (_<N>MB) so a 24 MB run can never overwrite
+    // previously collected 12 MB data. Only the jsmap modes (2..5) use the lazy map at all.
+    static char buf[64];
+    const char *base;
+    switch (timer_mode) {
+        case 1:  base = "chrome_clock"; break;
+        case 2:  base = "chrome_clock_jsmap"; break;
+        case 3:  base = "native_clock_jsmap"; break;
+        case 4:  base = "chrome_clock_jsmap_bidir"; break;
+        case 5:  base = "native_clock_jsmap_bidir"; break;
+        default: base = "native_clock"; break;
+    }
+    if (timer_mode < 2 || timer_mode > 5) return base;   // non-jsmap modes: no buffer to tag
+    char mbSuffix[16];
+    lazy_buf_size(mbSuffix, sizeof(mbSuffix));
+    snprintf(buf, sizeof(buf), "%s%s", base, mbSuffix);
+    return buf;
 }
 
 
@@ -966,6 +1025,17 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
         printf("[WARN] No {N}cycles field in '%s'; falling back to %d cycles/address\n", output_dir, cpa);
     }
     printf("Cycles per address: %d (from config label)\n", cpa);
+
+    // Total sampling time: the "{N}TST" field of the config label, overriding the TST_SEC
+    // default passed in by main(). Same contract as NoC/K/cycles -- the dir name defines the
+    // sampling, so data/<clock>/16C_4TST_90K_2288cycles/ really does hold 4 s traces.
+    int tst_label = parse_TST_from_dirname(output_dir);
+    if (tst_label > 0) {
+        tst_sec = (double)tst_label;
+    } else {
+        printf("[WARN] No {N}TST field in '%s'; falling back to %.1f s (TST_SEC)\n", output_dir, tst_sec);
+    }
+    printf("TST: %.1f s (from config label)\n", tst_sec);
 
     uint64_t TST_cycles = g_tsc_freq_hz * tst_sec;
     //print TST_Cycles and g_tsc_freq_hz
@@ -1006,7 +1076,9 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
     LazyMap jmap;
     memset(&jmap, 0, sizeof(jmap));
     if (use_jsmap) {
-        if (build_lazy_mapping(&jmap, NoC, l3_getSets(l3), l3_getAssociativity(l3), /*shufflePages=*/1, /*sizeMult=*/1)) {
+        char mbSuffix[16];
+        int sizeMult = lazy_buf_size(mbSuffix, sizeof(mbSuffix));   // env JSMAP_BUF_MB, default 12
+        if (build_lazy_mapping(&jmap, NoC, l3_getSets(l3), l3_getAssociativity(l3), /*shufflePages=*/1, sizeMult)) {
             fprintf(stderr, "Failed to build JS lazy mapping\n");
             l3_release(l3);
             return 1;

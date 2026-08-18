@@ -21,6 +21,9 @@
 #                         the sec-4 steady-state recovery (M_self should fall as WARMPASSES rises).
 #   JSMAP_BUF_MB (default 12) victim buffer in MB, a multiple of 12 (24 -> mean 24 lines/set).
 #                         Tagged _<MB>MB (omitted at 12).
+#   BIDIR_R   (default 0 = off) >0 selects the bidirectional (Mastik double-sided) sweep for
+#                         every cold/warm/measured pass instead of the plain pointer chase, with
+#                         R fwd+bwd oscillations. Tagged _bidirR<n>, e.g. selfevict_shuffled_bidirR2_pref0x0.
 #
 # Run as your normal user; it sudo's for the PMU setup and each measured run. Existing outputs
 # are skipped so re-running resumes.
@@ -54,6 +57,12 @@ if ! [[ "$JSMAP_BUF_MB" =~ ^[0-9]+$ ]] || [ "$JSMAP_BUF_MB" -lt 12 ] || [ $((JSM
 fi
 if [ "$JSMAP_BUF_MB" = 12 ]; then MB_SUFFIX=""; else MB_SUFFIX="_${JSMAP_BUF_MB}MB"; fi
 
+BIDIR_R="${BIDIR_R:-0}"
+if ! [[ "$BIDIR_R" =~ ^[0-9]+$ ]]; then
+    echo "BIDIR_R must be a non-negative integer, got '$BIDIR_R'" >&2; exit 2
+fi
+if [ "$BIDIR_R" -gt 0 ]; then BIDIR_TAG="_bidirR${BIDIR_R}"; else BIDIR_TAG=""; fi
+
 # Prefetcher-state tag: read MSR 0x1a4 (set bit DISABLES a prefetcher; bit1=L2 adjacent-line) on
 # every logical CPU. If all agree, tag the tree _pref0x<val> so prefetch conditions never collide.
 if ! command -v rdmsr >/dev/null 2>&1; then
@@ -71,7 +80,7 @@ if [ "$(printf '%s\n' "$PREF_VAL" | wc -l)" -ne 1 ]; then
 fi
 PREF_SUFFIX="_pref0x${PREF_VAL}"
 
-OUT_ROOT="data/coverage/$([ "$SHUFFLE" = 1 ] && echo selfevict_shuffled || echo selfevict)${PREF_SUFFIX}${MB_SUFFIX}"
+OUT_ROOT="data/coverage/$([ "$SHUFFLE" = 1 ] && echo selfevict_shuffled || echo selfevict)${BIDIR_TAG}${PREF_SUFFIX}${MB_SUFFIX}"
 
 ALL_NOCS=(2 4 8 16 32 64)
 if [ -n "$ONLY_NOC" ]; then
@@ -104,7 +113,7 @@ sudo sh -c 'echo 2 > /sys/devices/cpu/rdpmc' || { echo "[selfevict] ERROR: enabl
 sudo sh -c 'echo 0 > /proc/sys/kernel/nmi_watchdog' 2>/dev/null || \
     echo "[selfevict] note: could not disable nmi_watchdog (may already be off)"
 
-echo "[selfevict] SHUFFLE=$SHUFFLE ($SHUFFLE_TOKEN) WARMPASSES=$WARMPASSES buf=${JSMAP_BUF_MB}MB pref=0x${PREF_VAL}  NoCs: ${NOCS[*]}  iters each: $ITERS"
+echo "[selfevict] SHUFFLE=$SHUFFLE ($SHUFFLE_TOKEN) WARMPASSES=$WARMPASSES buf=${JSMAP_BUF_MB}MB pref=0x${PREF_VAL} bidirR=${BIDIR_R}  NoCs: ${NOCS[*]}  iters each: $ITERS"
 echo "[selfevict] output tree: $OUT_ROOT"
 
 # ---- sweep ----
@@ -120,6 +129,7 @@ for noc in "${NOCS[@]}"; do
         echo "============================================================"
         # sudo resets env; pass the tree tags the C tool needs to build its output path + buffer.
         if ! sudo env "PREF_SUFFIX=$PREF_SUFFIX" "JSMAP_BUF_MB=$JSMAP_BUF_MB" \
+                "JSMAP_BIDIR=$([ "$BIDIR_R" -gt 0 ] && echo 1 || echo 0)" "JSMAP_BIDIR_R=$BIDIR_R" \
                 ./CoverageValidator "$noc" "$i" selfevict "$SHUFFLE_TOKEN" "$WARMPASSES"; then
             echo "[selfevict] WARNING: run failed (NoC=$noc iter=$i) -- continuing"
             fail=$((fail + 1))

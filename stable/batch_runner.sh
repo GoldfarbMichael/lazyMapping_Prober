@@ -17,8 +17,12 @@ OUTPUT_DIR="batch_logs"
 # healthy long run is never killed while a genuinely hung process is still recovered.
 # These mirror the C program's inner cost in runStressNG_batches():
 NUM_STRESSORS=38       # entries in stress_battery[] (mastikElite.c) — keep in sync
-PER_SAMPLE_SECS=4      # ~TST(2s) + per-sample cooldown(1s) + steady/overhead, rounded up
+PER_SAMPLE_OVERHEAD=3  # per-sample cost ON TOP of TST: 1s cooldown + 50ms steady state + CSV write
 INTER_ROUND_SECS=8     # sleep() between rounds in runStressNG_batches
+DEFAULT_TST_SECS=2     # TST_SEC in mastikElite.h; used only if the label has no {N}TST field
+# PER_SAMPLE_SECS is DERIVED from the config label's TST field below (the C tool parses the same
+# field via parse_TST_from_dirname), so a TST=4 run widens the kill timeout automatically instead
+# of tripping a timeout sized for TST=2.
 TIMEOUT_SAFETY_PCT=140 # allow 140% of the estimate (40% headroom)
 
 # ============================================
@@ -94,6 +98,16 @@ fi
 CONFIG_DIR="$1"
 echo "Configuration Directory: $CONFIG_DIR"
 
+# Total sampling time per trace, read from the label's "{N}TST" field — the same field
+# parse_TST_from_dirname() feeds to the C sampler. Keeps the timeout estimate honest for any TST.
+TST_SECS="$(sed -n 's/.*[^0-9]\([0-9]\+\)TST.*/\1/p; s/^\([0-9]\+\)TST.*/\1/p' <<< "$CONFIG_DIR" | head -1)"
+if ! [[ "$TST_SECS" =~ ^[0-9]+$ ]] || [ "$TST_SECS" -le 0 ]; then
+    echo "⚠️  No {N}TST field in '$CONFIG_DIR'; assuming TST=${DEFAULT_TST_SECS}s for the timeout estimate"
+    TST_SECS=$DEFAULT_TST_SECS
+fi
+PER_SAMPLE_SECS=$(( TST_SECS + PER_SAMPLE_OVERHEAD ))
+echo "TST: ${TST_SECS}s  ->  per-sample budget ${PER_SAMPLE_SECS}s"
+
 # ============================================
 # Create directories
 # ============================================
@@ -110,6 +124,22 @@ esac
 if [[ -n "$SHUFFLE_FLAG" && "$TIMER_MODE" == "-c" ]]; then
     TIMER_SUBDIR="chrome_clock_shuffled"
 fi
+# Victim buffer size (jsmap modes only), forwarded to the C tool via JSMAP_BUF_MB. Non-default
+# sizes get their own tree (_<N>MB) so a 24 MB run never overwrites 12 MB data. Must mirror
+# timer_mode_subdir() in mastikElite.c exactly.
+JSMAP_BUF_MB="${JSMAP_BUF_MB:-12}"
+if ! [[ "$JSMAP_BUF_MB" =~ ^[0-9]+$ ]] || [ "$JSMAP_BUF_MB" -lt 12 ] || [ $((JSMAP_BUF_MB % 12)) -ne 0 ]; then
+    echo "❌ JSMAP_BUF_MB must be a multiple of 12 (>=12), got '$JSMAP_BUF_MB'" >&2
+    exit 2
+fi
+case "$TIMER_MODE" in
+    -j|-jn|-jb|-jnb)
+        if [ "$JSMAP_BUF_MB" != 12 ]; then TIMER_SUBDIR="${TIMER_SUBDIR}_${JSMAP_BUF_MB}MB"; fi ;;
+    *)
+        if [ "$JSMAP_BUF_MB" != 12 ]; then
+            echo "⚠️  JSMAP_BUF_MB=$JSMAP_BUF_MB ignored: $TIMER_MODE does not use the lazy map" >&2
+        fi ;;
+esac
 mkdir -p "data/$TIMER_SUBDIR/$CONFIG_DIR"  # Ensure config-specific data directory exists
 
 # ============================================
@@ -184,7 +214,7 @@ for ((batch=1; batch<=NUM_BATCHES; batch++)); do
     echo "   Start Time: $(date '+%Y-%m-%d %H:%M:%S')"
     echo "   System Health: $(check_system_health)"
     echo "   Estimated runtime: ~${EST_SECS}s | Kill timeout: ${TIMEOUT_SECS}s"
-    echo "   Running: sudo $PROGRAM $TIMER_MODE $SHUFFLE_FLAG $START_ITER $ACTUAL_BATCH_SIZE $CONFIG_DIR"
+    echo "   Running: sudo env JSMAP_BUF_MB=$JSMAP_BUF_MB $PROGRAM $TIMER_MODE $SHUFFLE_FLAG $START_ITER $ACTUAL_BATCH_SIZE $CONFIG_DIR"
     print_separator
 
     # Run the program with a workload-derived timeout (hang recovery only; never trims a healthy run).
@@ -193,7 +223,8 @@ for ((batch=1; batch<=NUM_BATCHES; batch++)); do
     MAX_RETRIES=3
 
     while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-        sudo timeout "$TIMEOUT_SECS" $PROGRAM $TIMER_MODE $SHUFFLE_FLAG $START_ITER $ACTUAL_BATCH_SIZE $CONFIG_DIR >> "$BATCH_LOG" 2>&1
+        # sudo resets the environment, so JSMAP_BUF_MB must be passed explicitly via `env`.
+        sudo env "JSMAP_BUF_MB=$JSMAP_BUF_MB" timeout "$TIMEOUT_SECS" $PROGRAM $TIMER_MODE $SHUFFLE_FLAG $START_ITER $ACTUAL_BATCH_SIZE $CONFIG_DIR >> "$BATCH_LOG" 2>&1
         EXIT_CODE=$?
 
         if [ $EXIT_CODE -eq 124 ]; then

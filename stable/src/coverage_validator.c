@@ -761,9 +761,20 @@ static int run_native_jsmap_experiment(int noc, int iterIdx, int shuffle,
 // and correctly scaled. warmPasses>1 adds warm-up sweeps before the measured pass, which
 // should drive M_self down (the sec 4 continuous-hammer steady-state recovery).
 // -----------------------------------------------------------------------------
+// Single self-eviction sweep pass: bidir (JSMAP_BIDIR_R>0) or the plain pointer chase.
+// Used for all three passes (cold, warm-up, measured) so they stay consistent.
+static inline void sweep_selfevict_pass(const LazyMap *m, int c, int bidirR) {
+    if (bidirR > 0) sweep_lazy_bidir(m, c, bidirR);
+    else            sweep_lazy_once(m, c, 1, 1, 0, 0);
+}
+
 static int run_selfevict_experiment(int noc, int iterIdx, int shuffle, int warmPasses) {
     pin_to_core(PROBER_CORE);                 // counter is programmed on this same core
     if (shuffle) srand((unsigned)(iterIdx + 1));
+
+    // Bidirectional sweep (env JSMAP_BIDIR=1 + JSMAP_BIDIR_R), same knob the jsmap coverage
+    // path uses. R==0 means bidir is off -> fall back to the plain pointer-chase sweep.
+    int bidirR = bidir_reps_from_env();
 
     // Program PMC0 on the prober core to count demand-load L3 misses (user mode only).
     pmu_setup(PROBER_CORE, 0, PMU_EVT_L3MISS_USR);
@@ -775,8 +786,9 @@ static int run_selfevict_experiment(int noc, int iterIdx, int shuffle, int warmP
         fprintf(stderr, "Failed to build JS lazy mapping\n");
         return 1;
     }
-    printf("[cov-selfevict] JS victim built (mmap %zu MB, pages %s, warmPasses=%d).\n",
-           map.bytes / (1024 * 1024), shuffle ? "shuffled" : "in-order", warmPasses);
+    printf("[cov-selfevict] JS victim built (mmap %zu MB, pages %s, warmPasses=%d, sweep=%s).\n",
+           map.bytes / (1024 * 1024), shuffle ? "shuffled" : "in-order", warmPasses,
+           bidirR > 0 ? "bidir" : "once");
     printf("[cov-selfevict] NoC=%d iter=%d: per-cluster flush -> %d warm sweep(s) -> measured sweep.\n",
            noc, iterIdx, warmPasses);
 
@@ -787,19 +799,22 @@ static int run_selfevict_experiment(int noc, int iterIdx, int shuffle, int warmP
     for (int c = 0; c < noc; c++) {
         flush_lazy_cluster(&map, c);                           // cold start
 
-        // Pass 1 (cold): all lines miss -> M_cold ~= nodeCount (counter sanity).
+        // Pass 1 (cold): always the plain single-directional sweep, even in bidir mode --
+        // this is a counter/methodology calibration (M_cold ~= nodeCount), not part of the
+        // experimental treatment, so it must not depend on R. Bidir only applies from the
+        // warm-up sweeps onward, where the access pattern being tested actually matters.
         uint64_t b = pmu_rdpmc(0);
         sweep_lazy_once(&map, c, 1, 1, 0, 0);
         mCold[c] = pmu_rdpmc(0) - b;
 
         // Additional warm-up sweeps (warmPasses counts warm sweeps incl. the cold one).
         for (int w = 1; w < warmPasses; w++)
-            sweep_lazy_once(&map, c, 1, 1, 0, 0);
+            sweep_selfevict_pass(&map, c, bidirR);
 
         // Measured pass: misses here = lines the prior sweep(s) failed to keep resident
         // = self-evicted lines.
         b = pmu_rdpmc(0);
-        sweep_lazy_once(&map, c, 1, 1, 0, 0);
+        sweep_selfevict_pass(&map, c, bidirR);
         mSelf[c] = pmu_rdpmc(0) - b;
 
         nodeCount[c] = (uint64_t)map.nodeCounts[c];
@@ -817,13 +832,16 @@ static int run_selfevict_experiment(int noc, int iterIdx, int shuffle, int warmP
            noc, sumColdFrac / noc, sumFrac / noc);
 
     // Write outputs: shuffled and unshuffled to separate trees, mirroring the jsmap paths.
-    // Tag with the prefetcher mask (PREF_SUFFIX, set by run_selfevict.sh) and buffer size, so
-    // selfevict trees are auto-named selfevict_shuffled_pref0x<v>[_NMB].
+    // Tag with the bidir sweep (if active), the prefetcher mask (PREF_SUFFIX, set by
+    // run_selfevict.sh), and buffer size, so selfevict trees are auto-named
+    // selfevict_shuffled[_bidirR<n>]_pref0x<v>[_NMB], mirroring native_jsmap_..._bidirR<n>_pref0x<v>.
     const char *sroot = shuffle ? DATA_DIR "/selfevict_shuffled" : DATA_DIR "/selfevict";
+    char bidirTag[24] = "";
+    if (bidirR > 0) snprintf(bidirTag, sizeof(bidirTag), "_bidirR%d", bidirR);
     const char *prefSuf = getenv("PREF_SUFFIX");
     if (!prefSuf) prefSuf = "";
-    char baseDir[176];
-    snprintf(baseDir, sizeof(baseDir), "%s%s%s", sroot, prefSuf, mbSuffix);
+    char baseDir[200];
+    snprintf(baseDir, sizeof(baseDir), "%s%s%s%s", sroot, bidirTag, prefSuf, mbSuffix);
     char dir[256], outPath[300];
     snprintf(dir, sizeof(dir), "%s/NoC%02d", baseDir, noc);
     mkdir_p(dir);
@@ -906,6 +924,8 @@ int main(int argc, char **argv) {
         // Direct PMU self-eviction measurement (no attacker). argv[4]="shuffle" for the
         // JS-faithful page-shuffled victim (default = in-order). argv[5]=warmPasses (warm
         // sweeps incl. the cold one before the measured pass; default 1 = measure pass 2).
+        // Env JSMAP_BIDIR=1 + JSMAP_BIDIR_R (default off): every cold/warm/measured pass uses
+        // sweep_lazy_bidir(R) instead of the plain pointer chase; tree gets a _bidirR<n> tag.
         int shuffle    = (argc > 4) && strcmp(argv[4], "shuffle") == 0;
         int warmPasses = (argc > 5) ? atoi(argv[5]) : 1;
         if (warmPasses < 1) warmPasses = 1;

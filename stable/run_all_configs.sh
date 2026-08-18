@@ -31,10 +31,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BATCH_RUNNER="$SCRIPT_DIR/batch_runner.sh"
 # TIMER_MODE="-c"   # Chrome timer (Mastik loaded-e_set clusters)
 # TIMER_MODE="-n"   # native timer
-# TIMER_MODE="-j"   # Chrome timer + JS-style lazy-map victim (data/chrome_clock_jsmap/...)
+TIMER_MODE="-j"   # Chrome timer + JS-style lazy-map victim (data/chrome_clock_jsmap/...)
 # TIMER_MODE="-jn"  # Native timer + JS-style lazy-map victim (data/native_clock_jsmap/...)
 # TIMER_MODE="-jb"  # Chrome timer + JS lazy map BIDIRECTIONAL (data/chrome_clock_jsmap_bidir/...)
-TIMER_MODE="-jnb" # Native timer + JS lazy map BIDIRECTIONAL (data/native_clock_jsmap_bidir/...)
+# TIMER_MODE="-jnb" # Native timer + JS lazy map BIDIRECTIONAL (data/native_clock_jsmap_bidir/...)
 # Shuffled-cluster A/B: set to "-s" WITH TIMER_MODE="-c" to line-shuffle the Mastik clusters
 # once -> data/chrome_clock_shuffled/. Empty (default) = normal contiguous clusters.
 SHUFFLE_FLAG="-s"
@@ -43,6 +43,16 @@ SHUFFLE_FLAG="-s"
 # exactly as JS main.js does with CYCLES_PER_ADDRESS. 2288 = the Chrome-mock eval config;
 # 300 reproduces the legacy native-clock sizing (200*1.5).
 CYCLES_PER_ADDRESS=2288
+# Total sampling time per trace, in seconds: the "{N}TST" field of the config label. The C tool
+# parses it (parse_TST_from_dirname) and it now drives the real sampling window, so changing this
+# changes both the data and its output tree (data/<clock>/<NoC>C_<TST>TST_.../). Integer seconds
+# only. Memorygram rows scale linearly with TST (rows = TST_cycles / (NoC * SST_cycles)).
+TST=4
+# Victim buffer size in MB for the jsmap modes (-j/-jn/-jb/-jnb). Must be a multiple of 12.
+# 12 (default) = one LLC = mean 12 lines/set; 24 = mean 24 lines/set. Non-default sizes write to
+# their own tree (data/<clock>_jsmap[_bidir]_<N>MB/), so 12 MB data is never overwritten.
+# Overridable from the environment: JSMAP_BUF_MB=24 ./run_all_configs.sh
+JSMAP_BUF_MB="${JSMAP_BUF_MB:-12}"
 COOLDOWN_SECS=60
 LOG_DIR="$SCRIPT_DIR/batch_logs"
 
@@ -51,6 +61,19 @@ LOG_DIR="$SCRIPT_DIR/batch_logs"
 if [[ "$TIMER_MODE" == "-j" || "$TIMER_MODE" == "-jn" \
    || "$TIMER_MODE" == "-jb" || "$TIMER_MODE" == "-jnb" ]]; then
     SHUFFLE_FLAG=""
+    IS_JSMAP=1
+else
+    IS_JSMAP=0
+fi
+
+# Validate the buffer size here so a bad value fails immediately instead of after the first
+# config has already started. batch_runner.sh re-validates; the C tool falls back to 12.
+if ! [[ "$JSMAP_BUF_MB" =~ ^[0-9]+$ ]] || [ "$JSMAP_BUF_MB" -lt 12 ] || [ $((JSMAP_BUF_MB % 12)) -ne 0 ]; then
+    echo "❌ JSMAP_BUF_MB must be a multiple of 12 (>=12), got '$JSMAP_BUF_MB'"
+    exit 2
+fi
+if [ "$IS_JSMAP" -eq 0 ] && [ "$JSMAP_BUF_MB" != 12 ]; then
+    echo "⚠️  JSMAP_BUF_MB=$JSMAP_BUF_MB has no effect with TIMER_MODE=$TIMER_MODE (no lazy map)."
 fi
 
 # ============================================
@@ -79,6 +102,14 @@ echo "  Batch Runner:      $BATCH_RUNNER"
 echo "  Timer Mode:        $TIMER_MODE"
 echo "  Shuffle Flag:      ${SHUFFLE_FLAG:-<none>}"
 echo "  Cycles/address:    $CYCLES_PER_ADDRESS"
+echo "  TST (sampling):    ${TST}s"
+if [ "$IS_JSMAP" -eq 1 ]; then
+    if [ "$JSMAP_BUF_MB" = 12 ]; then
+        echo "  Victim buffer:     ${JSMAP_BUF_MB} MB (default tree)"
+    else
+        echo "  Victim buffer:     ${JSMAP_BUF_MB} MB  -> tree tagged _${JSMAP_BUF_MB}MB"
+    fi
+fi
 echo "  Cooldown:          $COOLDOWN_SECS seconds"
 echo "  Log Directory:     $LOG_DIR"
 echo ""
@@ -119,7 +150,7 @@ POWERS_OF_2=(1 2 4 8 16 32 64)
 # POWERS_OF_2=(2)
 
 for clusters in "${POWERS_OF_2[@]}"; do
-    CONFIGS+=("${clusters}C_2TST_90K_${CYCLES_PER_ADDRESS}cycles")
+    CONFIGS+=("${clusters}C_${TST}TST_90K_${CYCLES_PER_ADDRESS}cycles")
 done
 
 TOTAL_CONFIGS=${#CONFIGS[@]}
@@ -142,7 +173,9 @@ for ((i=0; i<TOTAL_CONFIGS; i++)); do
     sudo -v 2>/dev/null
     
     # Run the batch_runner.sh
-    CMD="sudo $BATCH_RUNNER $TIMER_MODE $SHUFFLE_FLAG $CONFIG"
+    # sudo resets the environment, so JSMAP_BUF_MB must be handed over explicitly via `env`;
+    # otherwise batch_runner.sh would silently fall back to the 12 MB default.
+    CMD="sudo env JSMAP_BUF_MB=$JSMAP_BUF_MB $BATCH_RUNNER $TIMER_MODE $SHUFFLE_FLAG $CONFIG"
     echo "   Command: $CMD"
     echo "   Output:  $BATCH_LOG"
     echo ""

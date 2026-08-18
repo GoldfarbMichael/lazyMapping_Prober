@@ -215,9 +215,9 @@ else
     OUT_ROOT="data/coverage/$([ "$SHUFFLE" = 1 ] && echo native_shuffled || echo native)${PREF_SUFFIX}"
 fi
 
-# ALL_NOCS=(32 16 8 4 2 64)
-# ALL_NOCS=(32 16 8 64)
-ALL_NOCS=(64)
+# ALL_NOCS=(64 32 16 8 4 2)
+ALL_NOCS=(64 32 16 8)
+# ALL_NOCS=(64)
 
 
 

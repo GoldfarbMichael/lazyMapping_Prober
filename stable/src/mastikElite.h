@@ -63,8 +63,10 @@ void get_spatioTemporal_memoryGram_jsmap(LazyMap *m, int NoC, uint64_t TST_cycle
 
 // Config-label parsers ({NoC}C_{TST}TST_{K}K_{CYCLES}cycles). parse_cycles mirrors the JS
 // CYCLES_PER_ADDRESS field (main.js LABEL_RE) and drives SST_cycles for every timer_mode.
+// parse_TST overrides the TST_SEC default, so the label's TST field is authoritative too.
 int parse_NoC_from_dirname(const char *dirname);
 int parse_K_from_dirname(const char *dirname);
+int parse_TST_from_dirname(const char *dirname);
 int parse_cycles_from_dirname(const char *dirname);
 
 int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, char *output_dir,const char *backing_file, const char *BIN_file, int timer_mode, int shuffleClusters);
