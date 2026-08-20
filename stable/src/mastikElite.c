@@ -955,9 +955,122 @@ void get_spatioTemporal_memoryGram_jsmap(LazyMap *m, int NoC, uint64_t TST_cycle
 }
 
 
+/**
+ * Single-sweep (idle-fill) mock-clock sampler for the JS-style lazy-map victim (timer_mode==6 fwd,
+ * timer_mode==7 when bidir==1).
+ *
+ * A/B alternative to get_spatioTemporal_memoryGram_ChromeMock_jsmap. Instead of counting how many
+ * pointer-chase accesses fit in the quantum Q, this sweeps each cluster exactly ONCE (uncounted) --
+ * one fresh pass that probes L3 with L1/L2 cold and is linear in T_sweep -- then spins a PURE idle
+ * counter for the remainder of Q. The stored value is idle ~ (Q - T_sweep): a fast (low-occupancy)
+ * cluster leaves more idle time, so the count is HIGH -> same polarity as the throughput sampler
+ * (higher count = less contention). No re-touching, so no self-pollution.
+ *
+ * Timing model: the mock clock is edge-aligned ONCE at trace start (wait_edge) to get a clean phase,
+ * then free-runs -- each cluster's window START is a fresh chrome_mock_timer() read (mirrors the
+ * throughput twin), and its END is start + SST_us. If the single sweep already overran the window,
+ * the idle count is clipped to 0.
+ *
+ * @param K     Idle-loop poll cadence: poll the mock clock every K idle iterations. There is NO
+ *              dynamic-K path here (unlike the throughput samplers); K <= 0 falls back to the fixed
+ *              ACCESSES_TILL_TIMER_POLL default.
+ * @param bidir 0 = one forward ring per cell. 1 = one forward ring THEN one backward ring (element-2
+ *              chain; requires build_lazy_backlinks(m)) -- the double-sided single pass.
+ */
+void get_spatioTemporal_singleSweep_memoryGram_ChromeMock_jsmap(LazyMap *m, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename, int K, int bidir){
+    if (!m || !m->buf) {
+        fprintf(stderr, "FATAL: LazyMap is NULL/unbuilt.\n");
+        return;
+    }
+
+    if (!matrix) {
+        fprintf(stderr, "FATAL: matrix is NULL. Must be pre-allocated and initialized to 0.\n");
+        return;
+    }
+
+    // 1. Calculate matrix dimensions
+    uint64_t total_samples_per_cluster = TST_cycles / (NoC * SST_cycles);
+    uint64_t SST_us = (SST_cycles * 1000000) / g_tsc_freq_hz;  // window in mock-clock microseconds
+
+    // No dynamic-K in this sampler: K is the idle-loop poll cadence. A missing/malformed label
+    // field arrives as <= 0; fall back to the fixed default rather than the (nonexistent) dynamic path.
+    if (K <= 0) K = ACCESSES_TILL_TIMER_POLL;
+
+    // Edge-align the mock clock ONCE at trace start for a clean phase; free-run afterwards.
+    wait_edge(g_tsc_freq_hz, g_context_seed, g_secret_seed);
+
+    // 2. Spatio-Temporal Sampling Phase (Strictly NO I/O here)
+    for (uint64_t s = 0; s < total_samples_per_cluster; s++) {
+        for (int c = 0; c < NoC; c++) {
+
+            const uint32_t *buf = m->buf;
+            int n = m->nodeCounts[c];                    // ring length (lines in this cluster)
+
+            // Fresh free-run window read for this cluster (no re-alignment).
+            uint64_t start_cluster = chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed);
+            uint64_t end_cluster = start_cluster + SST_us;
+
+            // ---- ONE uncounted sweep of cluster c (probe L3 with L1/L2 cold) ----
+            register uint32_t curr = m->heads[c];
+            for (int i = 0; i < n; i++) curr = buf[curr];          // one forward ring
+            if (bidir) {
+                register uint32_t bcurr = m->heads[c] + 2;         // element-2 reverse chain
+                for (int i = 0; i < n; i++) bcurr = buf[bcurr];    // one backward ring
+                (void)bcurr;
+            }
+            (void)curr;  // keep the chase live under -O0 (defensive; value is intentionally unused)
+
+            // ---- idle-fill the rest of Q; idle count ~ (Q - T_sweep) ----
+            register uint32_t idle = 0;
+            if (chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed) < end_cluster) {
+                int check_count = 0;
+                while (1) {
+                    idle++;                              // pure idle work, no memory touch
+                    if (++check_count == K) {
+                        if (chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed) >= end_cluster) {
+                            break;
+                        }
+                        check_count = 0;
+                    }
+                }
+            }
+            // else: the single sweep already overran the window -> idle stays 0 (clip to 0)
+
+            matrix[s * NoC + c] = idle;
+        }
+    }
+
+    // 3. I/O Phase (Post-Measurement) -- identical CSV writer to the throughput twin
+    FILE *fp = fopen(filename, "w");
+    if (!fp) {
+        fprintf(stderr, "FATAL: Could not open output file %s\n", filename);
+        return;
+    }
+
+    // Write CSV Header
+    for (int g = 0; g < NoC; g++) {
+        fprintf(fp, "G%d%s", g, (g == NoC - 1) ? "" : ",");
+    }
+    fprintf(fp, "\n");
+
+    // Write Matrix Data
+    for (uint64_t t = 0; t < total_samples_per_cluster; t++) {
+        for (int g = 0; g < NoC; g++) {
+            fprintf(fp, "%u%s", matrix[t * NoC + g], (g == NoC - 1) ? "" : ",");
+        }
+        fprintf(fp, "\n");
+    }
+
+    fclose(fp);
+    printf("Successfully wrote %lu samples for %d clusters to %s\n", total_samples_per_cluster, NoC, filename);
+}
+
+
 // Output-tree subdir for a timer_mode: 0=native clock (Mastik e_sets), 1=Chrome mock clock
 // (Mastik e_sets), 2=Chrome mock clock (JS-style lazy map), 3=native clock (JS-style lazy map),
-// 4=Chrome mock clock (JS lazy map, BIDIRECTIONAL), 5=native clock (JS lazy map, BIDIRECTIONAL).
+// 4=Chrome mock clock (JS lazy map, BIDIRECTIONAL), 5=native clock (JS lazy map, BIDIRECTIONAL),
+// 6=Chrome mock clock (JS lazy map, SINGLE-SWEEP), 7=Chrome mock clock (JS lazy map, SINGLE-SWEEP
+// BIDIRECTIONAL).
 // Keeps each victim/clock combination in a distinct tree so previously collected data is never
 // touched (the bidir modes get their own tree = the A/B baseline vs the forward-only 2/3 trees).
 // Victim buffer size for the jsmap modes (env JSMAP_BUF_MB, default 12 = one LLC = mean 12
@@ -988,9 +1101,11 @@ static const char* timer_mode_subdir(int timer_mode) {
         case 3:  base = "native_clock_jsmap"; break;
         case 4:  base = "chrome_clock_jsmap_bidir"; break;
         case 5:  base = "native_clock_jsmap_bidir"; break;
+        case 6:  base = "chrome_clock_jsmapSS"; break;
+        case 7:  base = "chrome_clock_jsmapSS_bidir"; break;
         default: base = "native_clock"; break;
     }
-    if (timer_mode < 2 || timer_mode > 5) return base;   // non-jsmap modes: no buffer to tag
+    if (timer_mode < 2 || timer_mode > 7) return base;   // non-jsmap modes: no buffer to tag
     char mbSuffix[16];
     lazy_buf_size(mbSuffix, sizeof(mbSuffix));
     snprintf(buf, sizeof(buf), "%s%s", base, mbSuffix);
@@ -1045,7 +1160,8 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
     // 500us floor (JS MIN_QUANTUM_MS): applied ONLY to the Chrome-mock-clock modes (1 Mastik
     // e_sets, 2 JS-style lazy map), where the clock's 100us clamp makes a sub-500us quantum
     // meaningless. The native-clock modes (0 and 3) have cycle resolution and stay unfloored.
-    if (timer_mode == 1 || timer_mode == 2 || timer_mode == 4) {  // all mock-clock modes (4 = jsmap bidir)
+    if (timer_mode == 1 || timer_mode == 2 || timer_mode == 4 ||
+        timer_mode == 6 || timer_mode == 7) {  // all mock-clock modes (4 = jsmap bidir, 6/7 = single-sweep)
         uint64_t min_SST_cycles_for_500us = (500 * g_tsc_freq_hz) / 1000000;
         if (SST_cycles < min_SST_cycles_for_500us) {
             printf("[TIMER_MODE=%d] SST_cycles adjusted: %lu -> %lu (minimum 500us window)\n", timer_mode, SST_cycles, min_SST_cycles_for_500us);
@@ -1069,9 +1185,10 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
     // lazy map (always shuffled pages), built in a fresh mmap buffer exactly as the browser
     // does. The loaded e_sets are unused for those modes, but l3 is still used above for
     // identical TST/SST sizing.
-    // jsmap victim: forward-only (2 mock, 3 native) or bidirectional (4 mock, 5 native).
-    int use_jsmap = (timer_mode >= 2 && timer_mode <= 5);
-    int use_bidir = (timer_mode == 4 || timer_mode == 5);
+    // jsmap victim: forward-only (2 mock, 3 native), bidirectional (4 mock, 5 native), or
+    // single-sweep mock clock (6 fwd, 7 bidir).
+    int use_jsmap = (timer_mode >= 2 && timer_mode <= 7);
+    int use_bidir = (timer_mode == 4 || timer_mode == 5 || timer_mode == 7);
     Clusters_t *Clusters = NULL;
     LazyMap jmap;
     memset(&jmap, 0, sizeof(jmap));
@@ -1193,8 +1310,14 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
                 case 5:  // rdtscp64() with the JS-style lazy-map victim, BIDIRECTIONAL
                     get_spatioTemporal_memoryGram_jsmap(&jmap, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path, K, /*bidir=*/1);
                     break;
+                case 6:  // chrome_mock_timer() with the JS-style lazy-map victim, SINGLE-SWEEP (idle-fill), forward-only
+                    get_spatioTemporal_singleSweep_memoryGram_ChromeMock_jsmap(&jmap, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path, K, /*bidir=*/0);
+                    break;
+                case 7:  // chrome_mock_timer() with the JS-style lazy-map victim, SINGLE-SWEEP (idle-fill), BIDIRECTIONAL
+                    get_spatioTemporal_singleSweep_memoryGram_ChromeMock_jsmap(&jmap, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path, K, /*bidir=*/1);
+                    break;
                 default:
-                    fprintf(stderr, "ERROR: Unknown timer_mode %d. Use 0 (native), 1 (chrome mock), 2/3 (chrome-mock/native + JS lazy map), or 4/5 (chrome-mock/native + JS lazy map BIDIRECTIONAL)\n", timer_mode);
+                    fprintf(stderr, "ERROR: Unknown timer_mode %d. Use 0 (native), 1 (chrome mock), 2/3 (chrome-mock/native + JS lazy map), 4/5 (chrome-mock/native + JS lazy map BIDIRECTIONAL), or 6/7 (chrome-mock + JS lazy map SINGLE-SWEEP fwd/bidir)\n", timer_mode);
                     kill(pid, SIGKILL);
                     waitpid(pid, NULL, 0);
                     return 1;

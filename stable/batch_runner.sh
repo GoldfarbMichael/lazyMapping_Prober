@@ -31,7 +31,7 @@ TIMEOUT_SAFETY_PCT=140 # allow 140% of the estimate (40% headroom)
 if [[ $# -eq 0 ]]; then
     echo "❌ Missing required argument: CONFIG_DIR"
     echo ""
-    echo "Usage: $0 [-c|-n|-j|-jn|-jb|-jnb] [-s] CONFIG_DIR"
+    echo "Usage: $0 [-c|-n|-j|-jn|-jb|-jnb|-jss|-jssb] [-s] CONFIG_DIR"
     echo ""
     echo "Options:"
     echo "  -c              : Use Chrome mock timer (jittered, 100us clamped)"
@@ -40,6 +40,8 @@ if [[ $# -eq 0 ]]; then
     echo "  -jn             : Use native rdtscp64 timer with the JS-style lazy-map victim"
     echo "  -jb             : -j + BIDIRECTIONAL (Mastik double-sided) sweep"
     echo "  -jnb            : -jn + BIDIRECTIONAL (Mastik double-sided) sweep"
+    echo "  -jss            : Chrome mock timer + JS lazy map SINGLE-SWEEP (idle-fill)"
+    echo "  -jssb           : -jss + BIDIRECTIONAL single sweep"
     echo ""
     echo "Arguments:"
     echo "  CONFIG_DIR      : Configuration directory name (e.g., '16C_2TST_90K_2288cycles')"
@@ -63,9 +65,11 @@ while [[ "$1" == -* ]]; do
         -jn) TIMER_MODE="-jn"; echo "Timer Mode set to: Native rdtscp64 + JS-style lazy map (-jn)"; shift ;;
         -jb) TIMER_MODE="-jb"; echo "Timer Mode set to: Chrome Mock + JS-style lazy map BIDIRECTIONAL (-jb)"; shift ;;
         -jnb) TIMER_MODE="-jnb"; echo "Timer Mode set to: Native rdtscp64 + JS-style lazy map BIDIRECTIONAL (-jnb)"; shift ;;
+        -jss) TIMER_MODE="-jss"; echo "Timer Mode set to: Chrome Mock + JS-style lazy map SINGLE-SWEEP (-jss)"; shift ;;
+        -jssb) TIMER_MODE="-jssb"; echo "Timer Mode set to: Chrome Mock + JS-style lazy map SINGLE-SWEEP BIDIRECTIONAL (-jssb)"; shift ;;
         -s) SHUFFLE_FLAG="-s"; echo "Cluster shuffle: ON (-s; effective only with -c)"; shift ;;
         -h|--help)
-            echo "Usage: $0 [-c|-n|-j|-jn|-jb|-jnb] [-s] CONFIG_DIR"
+            echo "Usage: $0 [-c|-n|-j|-jn|-jb|-jnb|-jss|-jssb] [-s] CONFIG_DIR"
             echo ""
             echo "Options:"
             echo "  -c              : Use Chrome mock timer (jittered, 100us clamped)"
@@ -75,6 +79,8 @@ while [[ "$1" == -* ]]; do
             echo "                    (-> data/native_clock_jsmap/)"
             echo "  -jb             : -j + BIDIRECTIONAL sweep (-> data/chrome_clock_jsmap_bidir/)"
             echo "  -jnb            : -jn + BIDIRECTIONAL sweep (-> data/native_clock_jsmap_bidir/)"
+            echo "  -jss            : Chrome mock + JS lazy map SINGLE-SWEEP (-> data/chrome_clock_jsmapSS/)"
+            echo "  -jssb           : -jss + BIDIRECTIONAL (-> data/chrome_clock_jsmapSS_bidir/)"
             echo "  -s              : Line-shuffle the Mastik clusters once (only with -c;"
             echo "                    -> data/chrome_clock_shuffled/)"
             echo "  -h, --help      : Show this help message"
@@ -118,6 +124,8 @@ case "$TIMER_MODE" in
     -jn) TIMER_SUBDIR="native_clock_jsmap" ;;
     -jb) TIMER_SUBDIR="chrome_clock_jsmap_bidir" ;;
     -jnb) TIMER_SUBDIR="native_clock_jsmap_bidir" ;;
+    -jss) TIMER_SUBDIR="chrome_clock_jsmapSS" ;;
+    -jssb) TIMER_SUBDIR="chrome_clock_jsmapSS_bidir" ;;
     *)   TIMER_SUBDIR="native_clock" ;;
 esac
 # Shuffled Mastik e-set runs go to a distinct tree (must match the C tool's output path).
@@ -133,7 +141,7 @@ if ! [[ "$JSMAP_BUF_MB" =~ ^[0-9]+$ ]] || [ "$JSMAP_BUF_MB" -lt 12 ] || [ $((JSM
     exit 2
 fi
 case "$TIMER_MODE" in
-    -j|-jn|-jb|-jnb)
+    -j|-jn|-jb|-jnb|-jss|-jssb)
         if [ "$JSMAP_BUF_MB" != 12 ]; then TIMER_SUBDIR="${TIMER_SUBDIR}_${JSMAP_BUF_MB}MB"; fi ;;
     *)
         if [ "$JSMAP_BUF_MB" != 12 ]; then

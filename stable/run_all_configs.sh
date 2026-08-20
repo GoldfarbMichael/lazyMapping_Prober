@@ -35,6 +35,8 @@ TIMER_MODE="-j"   # Chrome timer + JS-style lazy-map victim (data/chrome_clock_j
 # TIMER_MODE="-jn"  # Native timer + JS-style lazy-map victim (data/native_clock_jsmap/...)
 # TIMER_MODE="-jb"  # Chrome timer + JS lazy map BIDIRECTIONAL (data/chrome_clock_jsmap_bidir/...)
 # TIMER_MODE="-jnb" # Native timer + JS lazy map BIDIRECTIONAL (data/native_clock_jsmap_bidir/...)
+# TIMER_MODE="-jss" # Chrome timer + JS lazy map SINGLE-SWEEP idle-fill (data/chrome_clock_jsmapSS/...)
+# TIMER_MODE="-jssb"# Chrome timer + JS lazy map SINGLE-SWEEP BIDIRECTIONAL (data/chrome_clock_jsmapSS_bidir/...)
 # Shuffled-cluster A/B: set to "-s" WITH TIMER_MODE="-c" to line-shuffle the Mastik clusters
 # once -> data/chrome_clock_shuffled/. Empty (default) = normal contiguous clusters.
 SHUFFLE_FLAG="-s"
@@ -76,7 +78,8 @@ DRY_RUN="${DRY_RUN:-0}"
 # The jsmap victim shuffles its pages internally (build_lazy_mapping); -s is a Mastik-e_set-only
 # knob, so never forward a stale shuffle flag into any jsmap run (forward-only or bidirectional).
 if [[ "$TIMER_MODE" == "-j" || "$TIMER_MODE" == "-jn" \
-   || "$TIMER_MODE" == "-jb" || "$TIMER_MODE" == "-jnb" ]]; then
+   || "$TIMER_MODE" == "-jb" || "$TIMER_MODE" == "-jnb" \
+   || "$TIMER_MODE" == "-jss" || "$TIMER_MODE" == "-jssb" ]]; then
     SHUFFLE_FLAG=""
     IS_JSMAP=1
 else
