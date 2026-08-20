@@ -47,7 +47,7 @@ CYCLES_PER_ADDRESS=2288
 # parses it (parse_TST_from_dirname) and it now drives the real sampling window, so changing this
 # changes both the data and its output tree (data/<clock>/<NoC>C_<TST>TST_.../). Integer seconds
 # only. Memorygram rows scale linearly with TST (rows = TST_cycles / (NoC * SST_cycles)).
-TST=4
+TST=2
 # Victim buffer size in MB for the jsmap modes (-j/-jn/-jb/-jnb). Must be a multiple of 12.
 # 12 (default) = one LLC = mean 12 lines/set; 24 = mean 24 lines/set. Non-default sizes write to
 # their own tree (data/<clock>_jsmap[_bidir]_<N>MB/), so 12 MB data is never overwritten.
@@ -55,6 +55,23 @@ TST=4
 JSMAP_BUF_MB="${JSMAP_BUF_MB:-12}"
 COOLDOWN_SECS=60
 LOG_DIR="$SCRIPT_DIR/batch_logs"
+
+# ============================================
+# Finalize / backup (post-sweep)
+# ============================================
+# After a FULLY successful sweep, pack this experiment's CSVs into one per-experiment .h5
+# (inner groups = NoCs), delete the source CSVs, and rsync the .h5 to the remote archive.
+# Runs only when FAIL_COUNT==0 (any failed config keeps ALL CSVs for retry). See
+# finalize_experiment.sh. Set DO_FINALIZE=0 to skip. DRY_RUN=1 reports the plan without writing.
+DO_FINALIZE="${DO_FINALIZE:-1}"
+FINALIZER="$SCRIPT_DIR/finalize_experiment.sh"
+REMOTE_HOST="${REMOTE_HOST:-132.72.67.152}"
+REMOTE_USER="${REMOTE_USER:-michael}"
+REMOTE_DIR="${REMOTE_DIR:-/home/michael/michaels_backup_data}"
+LOCAL_H5_DIR="${LOCAL_H5_DIR:-$SCRIPT_DIR/h5}"
+# Absolute path to a python3 that has h5py + pandas (the login user's conda env, NOT root's).
+PYTHON_BIN="${PYTHON_BIN:-/home/ubu/anaconda3/envs/PC37/bin/python3}"
+DRY_RUN="${DRY_RUN:-0}"
 
 # The jsmap victim shuffles its pages internally (build_lazy_mapping); -s is a Mastik-e_set-only
 # knob, so never forward a stale shuffle flag into any jsmap run (forward-only or bidirectional).
@@ -146,7 +163,9 @@ format_duration() {
 # ============================================
 CONFIGS=()
 # POWERS_OF_2=(1 2 4 8 16 32 64 256 512 1024 2048 4096)
-POWERS_OF_2=(1 2 4 8 16 32 64)
+# POWERS_OF_2=(1 2 4 8 16 32 64)
+POWERS_OF_2=(32)
+
 # POWERS_OF_2=(2)
 
 for clusters in "${POWERS_OF_2[@]}"; do
@@ -224,6 +243,31 @@ echo ""
 
 if [ $FAIL_COUNT -eq 0 ]; then
     echo "🎉 All configurations completed successfully!"
+
+    # ============================================
+    # Post-sweep: convert -> delete CSVs -> backup (only on a fully successful sweep)
+    # ============================================
+    if [ "$DO_FINALIZE" != "0" ]; then
+        if [[ ! -x "$FINALIZER" ]]; then
+            chmod +x "$FINALIZER" 2>/dev/null || true
+        fi
+        echo ""
+        print_separator
+        echo "🧩 Finalizing experiment (h5 + delete CSVs + backup)"
+        print_separator
+        if REMOTE_HOST="$REMOTE_HOST" REMOTE_USER="$REMOTE_USER" REMOTE_DIR="$REMOTE_DIR" \
+           LOCAL_H5_DIR="$LOCAL_H5_DIR" PYTHON_BIN="$PYTHON_BIN" DRY_RUN="$DRY_RUN" \
+           "$FINALIZER" "$TIMER_MODE" "$SHUFFLE_FLAG" "$TST" "$CYCLES_PER_ADDRESS" \
+           "$JSMAP_BUF_MB" "${POWERS_OF_2[@]}"; then
+            echo "✅ Finalize step completed."
+        else
+            echo "❌ Finalize step FAILED — CSVs preserved. Re-run finalize_experiment.sh manually."
+            exit 1
+        fi
+    else
+        echo "ℹ️  DO_FINALIZE=0 — skipping h5 conversion/backup; CSVs left in place."
+    fi
+
     exit 0
 else
     echo "⚠️  Some configurations failed. Review logs for details."

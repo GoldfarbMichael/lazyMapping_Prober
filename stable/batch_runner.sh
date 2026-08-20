@@ -8,8 +8,8 @@ trap 'sudo pkill -9 stress-ng 2>/dev/null; sudo pkill -9 MastikElite 2>/dev/null
 PROGRAM="./MastikElite"
 TIMER_MODE="-n"  # Default: -n (native), can be -c (chrome)
 CONFIG_DIR=""    # Will be set from command-line argument
-BATCH_SIZE=50
-TOTAL_ITERATIONS=50
+BATCH_SIZE=1
+TOTAL_ITERATIONS=1
 COOLDOWN_SECS=10
 OUTPUT_DIR="batch_logs"
 
