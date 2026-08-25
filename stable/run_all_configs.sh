@@ -31,12 +31,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BATCH_RUNNER="$SCRIPT_DIR/batch_runner.sh"
 # TIMER_MODE="-c"   # Chrome timer (Mastik loaded-e_set clusters)
 # TIMER_MODE="-n"   # native timer
-TIMER_MODE="-j"   # Chrome timer + JS-style lazy-map victim (data/chrome_clock_jsmap/...)
+# TIMER_MODE="-j"   # Chrome timer + JS-style lazy-map victim (data/chrome_clock_jsmap/...)
 # TIMER_MODE="-jn"  # Native timer + JS-style lazy-map victim (data/native_clock_jsmap/...)
 # TIMER_MODE="-jb"  # Chrome timer + JS lazy map BIDIRECTIONAL (data/chrome_clock_jsmap_bidir/...)
 # TIMER_MODE="-jnb" # Native timer + JS lazy map BIDIRECTIONAL (data/native_clock_jsmap_bidir/...)
 # TIMER_MODE="-jss" # Chrome timer + JS lazy map SINGLE-SWEEP idle-fill (data/chrome_clock_jsmapSS/...)
-# TIMER_MODE="-jssb"# Chrome timer + JS lazy map SINGLE-SWEEP BIDIRECTIONAL (data/chrome_clock_jsmapSS_bidir/...)
+# TIMER_MODE="-jssb"  # Chrome timer + JS lazy map SINGLE-SWEEP BIDIRECTIONAL (data/chrome_clock_jsmapSS_bidir/...)
+# TIMER_MODE="-jnss" # Native timer + JS lazy map SINGLE-SWEEP idle-fill (data/native_clock_jsmapSS/...)
+TIMER_MODE="-jnssb" # Native timer + JS lazy map SINGLE-SWEEP BIDIRECTIONAL (data/native_clock_jsmapSS_bidir/...)
 # Shuffled-cluster A/B: set to "-s" WITH TIMER_MODE="-c" to line-shuffle the Mastik clusters
 # once -> data/chrome_clock_shuffled/. Empty (default) = normal contiguous clusters.
 SHUFFLE_FLAG="-s"
@@ -44,7 +46,7 @@ SHUFFLE_FLAG="-s"
 # (parse_cycles_from_dirname) and sizes the cluster quantum as SST = N*setsPerCluster*assoc,
 # exactly as JS main.js does with CYCLES_PER_ADDRESS. 2288 = the Chrome-mock eval config;
 # 300 reproduces the legacy native-clock sizing (200*1.5).
-CYCLES_PER_ADDRESS=2288
+CYCLES_PER_ADDRESS=572
 # Total sampling time per trace, in seconds: the "{N}TST" field of the config label. The C tool
 # parses it (parse_TST_from_dirname) and it now drives the real sampling window, so changing this
 # changes both the data and its output tree (data/<clock>/<NoC>C_<TST>TST_.../). Integer seconds
@@ -79,7 +81,8 @@ DRY_RUN="${DRY_RUN:-0}"
 # knob, so never forward a stale shuffle flag into any jsmap run (forward-only or bidirectional).
 if [[ "$TIMER_MODE" == "-j" || "$TIMER_MODE" == "-jn" \
    || "$TIMER_MODE" == "-jb" || "$TIMER_MODE" == "-jnb" \
-   || "$TIMER_MODE" == "-jss" || "$TIMER_MODE" == "-jssb" ]]; then
+   || "$TIMER_MODE" == "-jss" || "$TIMER_MODE" == "-jssb" \
+   || "$TIMER_MODE" == "-jnss" || "$TIMER_MODE" == "-jnssb" ]]; then
     SHUFFLE_FLAG=""
     IS_JSMAP=1
 else
@@ -166,8 +169,8 @@ format_duration() {
 # ============================================
 CONFIGS=()
 # POWERS_OF_2=(1 2 4 8 16 32 64 256 512 1024 2048 4096)
-# POWERS_OF_2=(1 2 4 8 16 32 64)
-POWERS_OF_2=(32)
+POWERS_OF_2=(1 2 4 8 16 32 64)
+# POWERS_OF_2=(32)
 
 # POWERS_OF_2=(2)
 

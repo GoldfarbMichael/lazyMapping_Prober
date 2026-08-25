@@ -67,6 +67,11 @@ void get_spatioTemporal_memoryGram_jsmap(LazyMap *m, int NoC, uint64_t TST_cycle
 // K = idle-loop poll cadence (NO dynamic-K path). bidir 1 needs build_lazy_backlinks(m). See mastikElite.c.
 void get_spatioTemporal_singleSweep_memoryGram_ChromeMock_jsmap(LazyMap *m, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename, int K, int bidir);
 
+// Native-clock (rdtscp64) twin of the single-sweep sampler (timer_mode 8 fwd, 9 bidir): same
+// single-sweep + idle-fill structure, but rdtscp64() clock, SST_cycles window used directly (no us
+// conversion), and NO wait_edge (native cycle resolution). Mode 8 vs 6 isolates the clock. See mastikElite.c.
+void get_spatioTemporal_singleSweep_memoryGram_jsmap(LazyMap *m, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename, int K, int bidir);
+
 // Config-label parsers ({NoC}C_{TST}TST_{K}K_{CYCLES}cycles). parse_cycles mirrors the JS
 // CYCLES_PER_ADDRESS field (main.js LABEL_RE) and drives SST_cycles for every timer_mode.
 // parse_TST overrides the TST_SEC default, so the label's TST field is authoritative too.

@@ -67,13 +67,15 @@ case "$TIMER_MODE" in
     -jnb) CLOCK_SUBDIR="native_clock_jsmap_bidir" ;;
     -jss)  CLOCK_SUBDIR="chrome_clock_jsmapSS" ;;
     -jssb) CLOCK_SUBDIR="chrome_clock_jsmapSS_bidir" ;;
+    -jnss)  CLOCK_SUBDIR="native_clock_jsmapSS" ;;
+    -jnssb) CLOCK_SUBDIR="native_clock_jsmapSS_bidir" ;;
     *)    CLOCK_SUBDIR="native_clock" ;;
 esac
 if [ "$TIMER_MODE" = "-c" ] && [ "$SHUFFLE_FLAG" = "-s" ]; then
     CLOCK_SUBDIR="chrome_clock_shuffled"
 fi
 case "$TIMER_MODE" in
-    -j|-jn|-jb|-jnb|-jss|-jssb)
+    -j|-jn|-jb|-jnb|-jss|-jssb|-jnss|-jnssb)
         if [ "$JSMAP_BUF_MB" != "12" ]; then CLOCK_SUBDIR="${CLOCK_SUBDIR}_${JSMAP_BUF_MB}MB"; fi ;;
 esac
 DATA_ROOT="$SCRIPT_DIR/data/$CLOCK_SUBDIR"
@@ -96,6 +98,8 @@ case "$TIMER_MODE" in
     -jnb) CLOCK_LABEL="nativeJSmapBidir" ;;
     -jss)  CLOCK_LABEL="chromeJSmapSS" ;;
     -jssb) CLOCK_LABEL="chromeJSmapSSBidir" ;;
+    -jnss)  CLOCK_LABEL="nativeJSmapSS" ;;
+    -jnssb) CLOCK_LABEL="nativeJSmapSSBidir" ;;
     *)    CLOCK_LABEL="native" ;;
 esac
 if [ "$TIMER_MODE" = "-c" ] && [ "$SHUFFLE_FLAG" = "-s" ]; then

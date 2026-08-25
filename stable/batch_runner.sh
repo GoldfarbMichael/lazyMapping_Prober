@@ -8,8 +8,8 @@ trap 'sudo pkill -9 stress-ng 2>/dev/null; sudo pkill -9 MastikElite 2>/dev/null
 PROGRAM="./MastikElite"
 TIMER_MODE="-n"  # Default: -n (native), can be -c (chrome)
 CONFIG_DIR=""    # Will be set from command-line argument
-BATCH_SIZE=1
-TOTAL_ITERATIONS=1
+BATCH_SIZE=50
+TOTAL_ITERATIONS=50
 COOLDOWN_SECS=10
 OUTPUT_DIR="batch_logs"
 
@@ -31,7 +31,7 @@ TIMEOUT_SAFETY_PCT=140 # allow 140% of the estimate (40% headroom)
 if [[ $# -eq 0 ]]; then
     echo "❌ Missing required argument: CONFIG_DIR"
     echo ""
-    echo "Usage: $0 [-c|-n|-j|-jn|-jb|-jnb|-jss|-jssb] [-s] CONFIG_DIR"
+    echo "Usage: $0 [-c|-n|-j|-jn|-jb|-jnb|-jss|-jssb|-jnss|-jnssb] [-s] CONFIG_DIR"
     echo ""
     echo "Options:"
     echo "  -c              : Use Chrome mock timer (jittered, 100us clamped)"
@@ -42,6 +42,8 @@ if [[ $# -eq 0 ]]; then
     echo "  -jnb            : -jn + BIDIRECTIONAL (Mastik double-sided) sweep"
     echo "  -jss            : Chrome mock timer + JS lazy map SINGLE-SWEEP (idle-fill)"
     echo "  -jssb           : -jss + BIDIRECTIONAL single sweep"
+    echo "  -jnss           : Native rdtscp64 timer + JS lazy map SINGLE-SWEEP (idle-fill)"
+    echo "  -jnssb          : -jnss + BIDIRECTIONAL single sweep"
     echo ""
     echo "Arguments:"
     echo "  CONFIG_DIR      : Configuration directory name (e.g., '16C_2TST_90K_2288cycles')"
@@ -67,9 +69,11 @@ while [[ "$1" == -* ]]; do
         -jnb) TIMER_MODE="-jnb"; echo "Timer Mode set to: Native rdtscp64 + JS-style lazy map BIDIRECTIONAL (-jnb)"; shift ;;
         -jss) TIMER_MODE="-jss"; echo "Timer Mode set to: Chrome Mock + JS-style lazy map SINGLE-SWEEP (-jss)"; shift ;;
         -jssb) TIMER_MODE="-jssb"; echo "Timer Mode set to: Chrome Mock + JS-style lazy map SINGLE-SWEEP BIDIRECTIONAL (-jssb)"; shift ;;
+        -jnss) TIMER_MODE="-jnss"; echo "Timer Mode set to: Native rdtscp64 + JS-style lazy map SINGLE-SWEEP (-jnss)"; shift ;;
+        -jnssb) TIMER_MODE="-jnssb"; echo "Timer Mode set to: Native rdtscp64 + JS-style lazy map SINGLE-SWEEP BIDIRECTIONAL (-jnssb)"; shift ;;
         -s) SHUFFLE_FLAG="-s"; echo "Cluster shuffle: ON (-s; effective only with -c)"; shift ;;
         -h|--help)
-            echo "Usage: $0 [-c|-n|-j|-jn|-jb|-jnb|-jss|-jssb] [-s] CONFIG_DIR"
+            echo "Usage: $0 [-c|-n|-j|-jn|-jb|-jnb|-jss|-jssb|-jnss|-jnssb] [-s] CONFIG_DIR"
             echo ""
             echo "Options:"
             echo "  -c              : Use Chrome mock timer (jittered, 100us clamped)"
@@ -81,6 +85,8 @@ while [[ "$1" == -* ]]; do
             echo "  -jnb            : -jn + BIDIRECTIONAL sweep (-> data/native_clock_jsmap_bidir/)"
             echo "  -jss            : Chrome mock + JS lazy map SINGLE-SWEEP (-> data/chrome_clock_jsmapSS/)"
             echo "  -jssb           : -jss + BIDIRECTIONAL (-> data/chrome_clock_jsmapSS_bidir/)"
+            echo "  -jnss           : Native + JS lazy map SINGLE-SWEEP (-> data/native_clock_jsmapSS/)"
+            echo "  -jnssb          : -jnss + BIDIRECTIONAL (-> data/native_clock_jsmapSS_bidir/)"
             echo "  -s              : Line-shuffle the Mastik clusters once (only with -c;"
             echo "                    -> data/chrome_clock_shuffled/)"
             echo "  -h, --help      : Show this help message"
@@ -126,6 +132,8 @@ case "$TIMER_MODE" in
     -jnb) TIMER_SUBDIR="native_clock_jsmap_bidir" ;;
     -jss) TIMER_SUBDIR="chrome_clock_jsmapSS" ;;
     -jssb) TIMER_SUBDIR="chrome_clock_jsmapSS_bidir" ;;
+    -jnss) TIMER_SUBDIR="native_clock_jsmapSS" ;;
+    -jnssb) TIMER_SUBDIR="native_clock_jsmapSS_bidir" ;;
     *)   TIMER_SUBDIR="native_clock" ;;
 esac
 # Shuffled Mastik e-set runs go to a distinct tree (must match the C tool's output path).
@@ -141,7 +149,7 @@ if ! [[ "$JSMAP_BUF_MB" =~ ^[0-9]+$ ]] || [ "$JSMAP_BUF_MB" -lt 12 ] || [ $((JSM
     exit 2
 fi
 case "$TIMER_MODE" in
-    -j|-jn|-jb|-jnb|-jss|-jssb)
+    -j|-jn|-jb|-jnb|-jss|-jssb|-jnss|-jnssb)
         if [ "$JSMAP_BUF_MB" != 12 ]; then TIMER_SUBDIR="${TIMER_SUBDIR}_${JSMAP_BUF_MB}MB"; fi ;;
     *)
         if [ "$JSMAP_BUF_MB" != 12 ]; then

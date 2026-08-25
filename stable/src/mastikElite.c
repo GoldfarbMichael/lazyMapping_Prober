@@ -1066,11 +1066,119 @@ void get_spatioTemporal_singleSweep_memoryGram_ChromeMock_jsmap(LazyMap *m, int 
 }
 
 
+/**
+ * NATIVE-CLOCK twin of get_spatioTemporal_singleSweep_memoryGram_ChromeMock_jsmap (timer_mode==8 fwd,
+ * timer_mode==9 when bidir==1).
+ *
+ * Same single-sweep + idle-fill sampler (one uncounted sweep per cluster, then a pure idle counter
+ * for the rest of the quantum; matrix[s*NoC+c] = idle ~ (Q - T_sweep)), the ONLY differences being
+ * the clock and window units -- exactly the deltas that separate the native jsmap twin (mode 3) from
+ * the mock-clock jsmap sampler (mode 2):
+ *   - the clock is rdtscp64() instead of chrome_mock_timer();
+ *   - the window is start + SST_cycles directly (no us conversion);
+ *   - there is NO wait_edge at trace start (native cycle resolution; edge-alignment is a mock-clock
+ *     concept).
+ * That makes mode 8 vs. mode 6 a CLOCK-ONLY A/B, and mode 8 vs. mode 3 a SAMPLER-ONLY A/B
+ * (single-sweep vs. throughput) at native resolution.
+ *
+ * @param K     Idle-loop poll cadence (poll rdtscp64 every K idle iterations). No dynamic-K path;
+ *              K <= 0 falls back to the fixed ACCESSES_TILL_TIMER_POLL default.
+ * @param bidir 0 = one forward ring per cell. 1 = one forward ring THEN one backward ring (element-2
+ *              chain; requires build_lazy_backlinks(m)).
+ */
+void get_spatioTemporal_singleSweep_memoryGram_jsmap(LazyMap *m, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename, int K, int bidir){
+    if (!m || !m->buf) {
+        fprintf(stderr, "FATAL: LazyMap is NULL/unbuilt.\n");
+        return;
+    }
+
+    if (!matrix) {
+        fprintf(stderr, "FATAL: matrix is NULL. Must be pre-allocated and initialized to 0.\n");
+        return;
+    }
+
+    // 1. Calculate matrix dimensions
+    uint64_t total_samples_per_cluster = TST_cycles / (NoC * SST_cycles);
+
+    // No dynamic-K in this sampler: K is the idle-loop poll cadence. A missing/malformed label field
+    // arrives as <= 0; fall back to the fixed default rather than the (nonexistent) dynamic path.
+    if (K <= 0) K = ACCESSES_TILL_TIMER_POLL;
+
+    // NOTE: no wait_edge here -- rdtscp64 has cycle resolution, so there is no clock edge to align to.
+
+    // 2. Spatio-Temporal Sampling Phase (Strictly NO I/O here)
+    for (uint64_t s = 0; s < total_samples_per_cluster; s++) {
+        for (int c = 0; c < NoC; c++) {
+
+            const uint32_t *buf = m->buf;
+            int n = m->nodeCounts[c];                    // ring length (lines in this cluster)
+
+            // Window in cycles throughout (no unit conversion).
+            uint64_t start_cluster = rdtscp64();
+            uint64_t end_cluster = start_cluster + SST_cycles;
+
+            // ---- ONE uncounted sweep of cluster c (probe L3 with L1/L2 cold) ----
+            register uint32_t curr = m->heads[c];
+            for (int i = 0; i < n; i++) curr = buf[curr];          // one forward ring
+            if (bidir) {
+                register uint32_t bcurr = m->heads[c] + 2;         // element-2 reverse chain
+                for (int i = 0; i < n; i++) bcurr = buf[bcurr];    // one backward ring
+                (void)bcurr;
+            }
+            (void)curr;  // keep the chase live under -O0 (defensive; value is intentionally unused)
+
+            // ---- idle-fill the rest of Q; idle count ~ (Q - T_sweep) ----
+            register uint32_t idle = 0;
+            if (rdtscp64() < end_cluster) {
+                int check_count = 0;
+                while (1) {
+                    idle++;                              // pure idle work, no memory touch
+                    if (++check_count == K) {
+                        if (rdtscp64() >= end_cluster) {
+                            break;
+                        }
+                        check_count = 0;
+                    }
+                }
+            }
+            // else: the single sweep already overran the window -> idle stays 0 (clip to 0)
+
+            matrix[s * NoC + c] = idle;
+        }
+    }
+
+    // 3. I/O Phase (Post-Measurement) -- identical CSV writer to the mock-clock twin
+    FILE *fp = fopen(filename, "w");
+    if (!fp) {
+        fprintf(stderr, "FATAL: Could not open output file %s\n", filename);
+        return;
+    }
+
+    // Write CSV Header
+    for (int g = 0; g < NoC; g++) {
+        fprintf(fp, "G%d%s", g, (g == NoC - 1) ? "" : ",");
+    }
+    fprintf(fp, "\n");
+
+    // Write Matrix Data
+    for (uint64_t t = 0; t < total_samples_per_cluster; t++) {
+        for (int g = 0; g < NoC; g++) {
+            fprintf(fp, "%u%s", matrix[t * NoC + g], (g == NoC - 1) ? "" : ",");
+        }
+        fprintf(fp, "\n");
+    }
+
+    fclose(fp);
+    printf("Successfully wrote %lu samples for %d clusters to %s\n", total_samples_per_cluster, NoC, filename);
+}
+
+
 // Output-tree subdir for a timer_mode: 0=native clock (Mastik e_sets), 1=Chrome mock clock
 // (Mastik e_sets), 2=Chrome mock clock (JS-style lazy map), 3=native clock (JS-style lazy map),
 // 4=Chrome mock clock (JS lazy map, BIDIRECTIONAL), 5=native clock (JS lazy map, BIDIRECTIONAL),
 // 6=Chrome mock clock (JS lazy map, SINGLE-SWEEP), 7=Chrome mock clock (JS lazy map, SINGLE-SWEEP
-// BIDIRECTIONAL).
+// BIDIRECTIONAL), 8=native clock (JS lazy map, SINGLE-SWEEP), 9=native clock (JS lazy map,
+// SINGLE-SWEEP BIDIRECTIONAL).
 // Keeps each victim/clock combination in a distinct tree so previously collected data is never
 // touched (the bidir modes get their own tree = the A/B baseline vs the forward-only 2/3 trees).
 // Victim buffer size for the jsmap modes (env JSMAP_BUF_MB, default 12 = one LLC = mean 12
@@ -1103,9 +1211,11 @@ static const char* timer_mode_subdir(int timer_mode) {
         case 5:  base = "native_clock_jsmap_bidir"; break;
         case 6:  base = "chrome_clock_jsmapSS"; break;
         case 7:  base = "chrome_clock_jsmapSS_bidir"; break;
+        case 8:  base = "native_clock_jsmapSS"; break;
+        case 9:  base = "native_clock_jsmapSS_bidir"; break;
         default: base = "native_clock"; break;
     }
-    if (timer_mode < 2 || timer_mode > 7) return base;   // non-jsmap modes: no buffer to tag
+    if (timer_mode < 2 || timer_mode > 9) return base;   // non-jsmap modes: no buffer to tag
     char mbSuffix[16];
     lazy_buf_size(mbSuffix, sizeof(mbSuffix));
     snprintf(buf, sizeof(buf), "%s%s", base, mbSuffix);
@@ -1185,10 +1295,10 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
     // lazy map (always shuffled pages), built in a fresh mmap buffer exactly as the browser
     // does. The loaded e_sets are unused for those modes, but l3 is still used above for
     // identical TST/SST sizing.
-    // jsmap victim: forward-only (2 mock, 3 native), bidirectional (4 mock, 5 native), or
-    // single-sweep mock clock (6 fwd, 7 bidir).
-    int use_jsmap = (timer_mode >= 2 && timer_mode <= 7);
-    int use_bidir = (timer_mode == 4 || timer_mode == 5 || timer_mode == 7);
+    // jsmap victim: forward-only (2 mock, 3 native), bidirectional (4 mock, 5 native), single-sweep
+    // mock clock (6 fwd, 7 bidir), or single-sweep native clock (8 fwd, 9 bidir).
+    int use_jsmap = (timer_mode >= 2 && timer_mode <= 9);
+    int use_bidir = (timer_mode == 4 || timer_mode == 5 || timer_mode == 7 || timer_mode == 9);
     Clusters_t *Clusters = NULL;
     LazyMap jmap;
     memset(&jmap, 0, sizeof(jmap));
@@ -1316,8 +1426,14 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
                 case 7:  // chrome_mock_timer() with the JS-style lazy-map victim, SINGLE-SWEEP (idle-fill), BIDIRECTIONAL
                     get_spatioTemporal_singleSweep_memoryGram_ChromeMock_jsmap(&jmap, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path, K, /*bidir=*/1);
                     break;
+                case 8:  // rdtscp64() with the JS-style lazy-map victim, SINGLE-SWEEP (idle-fill), forward-only
+                    get_spatioTemporal_singleSweep_memoryGram_jsmap(&jmap, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path, K, /*bidir=*/0);
+                    break;
+                case 9:  // rdtscp64() with the JS-style lazy-map victim, SINGLE-SWEEP (idle-fill), BIDIRECTIONAL
+                    get_spatioTemporal_singleSweep_memoryGram_jsmap(&jmap, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path, K, /*bidir=*/1);
+                    break;
                 default:
-                    fprintf(stderr, "ERROR: Unknown timer_mode %d. Use 0 (native), 1 (chrome mock), 2/3 (chrome-mock/native + JS lazy map), 4/5 (chrome-mock/native + JS lazy map BIDIRECTIONAL), or 6/7 (chrome-mock + JS lazy map SINGLE-SWEEP fwd/bidir)\n", timer_mode);
+                    fprintf(stderr, "ERROR: Unknown timer_mode %d. Use 0 (native), 1 (chrome mock), 2/3 (chrome-mock/native + JS lazy map), 4/5 (chrome-mock/native + JS lazy map BIDIRECTIONAL), 6/7 (chrome-mock + JS lazy map SINGLE-SWEEP fwd/bidir), or 8/9 (native + JS lazy map SINGLE-SWEEP fwd/bidir)\n", timer_mode);
                     kill(pid, SIGKILL);
                     waitpid(pid, NULL, 0);
                     return 1;
