@@ -7,7 +7,12 @@ groups are the NoCs. Each NoC group is written ONCE from fully-materialized CSVs
 append and no dataset resizing (the structural win over the old global-append workflow).
 
 On-disk CSV tree (see mastikElite.c:1142):
-    <data_root>/<NoC>C_<TST>TST_90K_<cpa>cycles/<stressor>/<n>.csv
+    <data_root>/<NoC>C_<TST>TST_<K>K_<cpa>cycles/<stressor>/<n>.csv
+A config dir MAY carry a leading tag before the NoC field -- the real-browser (Stage 3) tree uses
+    <data_root>/realbrowser_<NoC>C_<TST>TST_<K>K_<cpa>cycles/<stressor>/<n>.csv
+(the tag keeps a manual single-shot browser run, which writes a bare <NoC>C_... dir under the same
+JavaScript/data root, from landing in a sweep's class dirs). NOC_RE therefore searches for the
+"<N>C_" field rather than anchoring it at the start.
 CSV shape: header "G0..G{NoC-1}", then rows of uint. rows = T (time slots), cols = NoC (G).
 Stored X keeps the project convention (samples, G, T) via a per-sample transpose (T,G) -> (G,T).
 
@@ -29,13 +34,14 @@ import h5py
 import numpy as np
 import pandas as pd
 
-NOC_RE = re.compile(r"^(\d+)C_")
+NOC_RE = re.compile(r"(?:^|_)(\d+)C_")   # "16C_..." or "<tag>_16C_..."
 
 
 def parse_noc(config_name: str) -> int:
-    m = NOC_RE.match(config_name)
+    m = NOC_RE.search(config_name)
     if not m:
-        raise ValueError(f"cannot parse NoC from config dir name '{config_name}' (expected '<N>C_...')")
+        raise ValueError(f"cannot parse NoC from config dir name '{config_name}' "
+                         f"(expected '<N>C_...' or '<tag>_<N>C_...')")
     return int(m.group(1))
 
 
