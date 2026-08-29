@@ -34,8 +34,14 @@ COV_OBJS = $(COV_SRCS:.c=.o)
 # Fingerprint orchestrator (real-browser Stage 3: drives Chrome JS sampling + stress-ng).
 # Reuses the same non-main objects + its own main.
 FP_TARGET = FingerprintOrchestrator
-FP_SRCS = src/fingerprint_orchestrator.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c src/lazy_map.c
+FP_SRCS = src/fingerprint_orchestrator.c src/fp_ctl.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c src/lazy_map.c
 FP_OBJS = $(FP_SRCS:.c=.o)
+
+# Website orchestrator (Stage 4: drives Chrome JS sampling + real websites in a second tab).
+# Same object set as FP_SRCS (it needs mastikElite.c's parse_*_from_dirname) + its own main.
+WEB_TARGET = WebsiteOrchestrator
+WEB_SRCS = src/website_orchestrator.c src/fp_ctl.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c src/lazy_map.c
+WEB_OBJS = $(WEB_SRCS:.c=.o)
 
 # Build Rules
 all: $(TARGET)
@@ -49,6 +55,9 @@ $(COV_TARGET): $(COV_OBJS)
 $(FP_TARGET): $(FP_OBJS)
 	$(CC) $(CFLAGS) -o $(FP_TARGET) $(FP_OBJS) $(LDFLAGS)
 
+$(WEB_TARGET): $(WEB_OBJS)
+	$(CC) $(CFLAGS) -o $(WEB_TARGET) $(WEB_OBJS) $(LDFLAGS)
+
 # Compile source files into object files
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -59,6 +68,6 @@ mastik:
 	cd $(MASTIK_DIR)/src && $(MAKE)
 
 clean:
-	rm -f $(OBJS) $(COV_OBJS) $(FP_OBJS) $(TARGET) $(COV_TARGET) $(FP_TARGET)
+	rm -f $(OBJS) $(COV_OBJS) $(FP_OBJS) $(WEB_OBJS) $(TARGET) $(COV_TARGET) $(FP_TARGET) $(WEB_TARGET)
 
 .PHONY: all clean mastik

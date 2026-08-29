@@ -1,6 +1,7 @@
 from flask import Flask, request, send_from_directory, jsonify
 from flask_cors import CORS
 import os
+import re
 import json
 import time
 
@@ -27,7 +28,30 @@ ctl_cluster = -1
 # the browser samples the memorygram with NO network in the loop, POSTs the CSV to
 # /collect, then acks /fp/done with that seq. The seq token makes the handshake race-free
 # (exactly one /collect per /fp/cmd). "workload" rides along so /collect's path is right.
-fp = {"seq": 0, "cmd": "idle", "workload": "", "ready": False, "done_seq": -1}
+fp = {"seq": 0, "cmd": "idle", "workload": "", "ready": False,
+      # started_seq: the browser has ENTERED its synchronous sampling loop for this seq.
+      # website_orchestrator.c blocks on this before it opens the victim tab, so the page
+      # load lands at t=0 of the trace instead of somewhere inside it. Stage 3 does not use
+      # it (stress-ng is a steady state, so alignment does not matter there).
+      "started_seq": -1,
+      "done_seq": -1}
+
+
+# A workload/config string becomes a DIRECTORY NAME below, so it must be a single safe path
+# component. Without this, os.path.join() quietly does the wrong thing rather than failing:
+# "https://x.com" becomes the nested "https:/x.com/" (which csv_to_h5.py's one-level class
+# scan cannot see), a leading "/" makes join() DISCARD the data root and write anywhere, and
+# ".." escapes the tree. Rejecting is safe here because every legitimate caller already sends
+# a slug: the stressor name, or sites.txt's validated slug field.
+SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def safe_component(value, what):
+    """Return value if it is a safe single path component, else None (caller 400s)."""
+    if isinstance(value, str) and value not in (".", "..") and SAFE_COMPONENT.match(value):
+        return value
+    print(f"REJECTED {what}: {value!r} (must match [A-Za-z0-9._-]+)")
+    return None
 
 
 def next_index(directory):
@@ -79,8 +103,11 @@ def set_metadata():
     global current_config, current_workload
     data = request.get_json(force=True, silent=True) or {}
 
-    current_config = data.get("config", "manual")
-    current_workload = data.get("workload", "manual")
+    cfg = safe_component(data.get("config", "manual"), "config")
+    wl = safe_component(data.get("workload", "manual"), "workload")
+    if cfg is None or wl is None:
+        return jsonify(status="error", reason="unsafe config/workload"), 400
+    current_config, current_workload = cfg, wl
 
     print(f"Metadata set - config: {current_config}, workload: {current_workload}")
     return jsonify(status="ok", config=current_config, workload=current_workload), 200
@@ -93,7 +120,14 @@ def collect():
     # done here so none of it overlaps the sampling window.
     csv_text = request.get_data(as_text=True)
 
-    directory = os.path.join(DATA_ROOT, current_config, current_workload)
+    # Validate before touching the filesystem. A rejection here means the orchestrator sent
+    # something unexpected; failing loudly beats scattering CSVs outside the class tree.
+    cfg = safe_component(current_config, "config")
+    wl = safe_component(current_workload, "workload")
+    if cfg is None or wl is None:
+        return jsonify(status="error", reason="unsafe config/workload"), 400
+
+    directory = os.path.join(DATA_ROOT, cfg, wl)
     os.makedirs(directory, exist_ok=True)
 
     n = next_index(directory)
@@ -169,6 +203,15 @@ def fp_poll():
     return jsonify(seq=fp["seq"], cmd=fp["cmd"], workload=fp["workload"]), 200
 
 
+@app.route("/fp/started", methods=["POST"])
+def fp_started():
+    # Browser: about to enter the synchronous sampling loop for this seq. The website
+    # orchestrator waits for this before navigating the victim tab (see fp["started_seq"]).
+    data = request.get_json(force=True, silent=True) or {}
+    fp["started_seq"] = int(data.get("seq", -1))
+    return jsonify(status="ok", started_seq=fp["started_seq"]), 200
+
+
 @app.route("/fp/done", methods=["POST"])
 def fp_done():
     # Browser acks that it sampled + saved the CSV for the given seq.
@@ -188,8 +231,14 @@ def fp_cmd():
     if cmd == "sample":
         # Set the /collect path globals BEFORE advancing seq so the browser never samples
         # against a stale workload/config.
-        current_workload = data.get("workload", "manual")
-        current_config = data.get("config", "manual")
+        wl = safe_component(data.get("workload", "manual"), "workload")
+        cfg = safe_component(data.get("config", "manual"), "config")
+        if wl is None or cfg is None:
+            # Refuse WITHOUT bumping seq: the browser must not sample against a path we
+            # would then reject at /collect, which would burn a sample slot silently.
+            return jsonify(status="error", reason="unsafe config/workload"), 400
+        current_workload = wl
+        current_config = cfg
         fp["workload"] = current_workload
         fp["cmd"] = "sample"
         fp["seq"] += 1
@@ -203,7 +252,8 @@ def fp_cmd():
 @app.route("/fp/state", methods=["GET"])
 def fp_state():
     # C orchestrator reads readiness + the latest acked seq.
-    return jsonify(ready=fp["ready"], seq=fp["seq"], done_seq=fp["done_seq"]), 200
+    return jsonify(ready=fp["ready"], seq=fp["seq"],
+                   started_seq=fp["started_seq"], done_seq=fp["done_seq"]), 200
 
 
 @app.route("/fp/reset", methods=["POST"])
@@ -211,7 +261,7 @@ def fp_reset():
     # C orchestrator calls this at startup (BEFORE launching Chrome) so a stale "ready"
     # from a previous, now-dead browser can't make wait_ready() pass before the NEW
     # browser has built its mapping. Returns the coordinator to its initial state.
-    fp.update(seq=0, cmd="idle", workload="", ready=False, done_seq=-1)
+    fp.update(seq=0, cmd="idle", workload="", ready=False, started_seq=-1, done_seq=-1)
     print("fp: reset")
     return jsonify(status="ok"), 200
 

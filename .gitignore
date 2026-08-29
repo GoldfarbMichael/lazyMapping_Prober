@@ -11,6 +11,9 @@ CLAUDE.md
 
 *.log
 *.txt
+# ...except the Stage 4 class list: sites.txt IS experiment configuration (it defines the
+# website class set and the .h5 label_map keys), so a run is not reproducible without it.
+!stable/sites.txt
 *.patch
 *.bin
 *.csv

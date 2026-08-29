@@ -83,10 +83,10 @@ C:  wait ~50 ms (let the stressor reach steady state)
 C:  POST /fp/cmd {sample, workload}  -> gets seq
 JS: /fp/poll sees the new seq -> sampleMemorygram()   (NO network)
 JS: POST /collect (CSV)  ->  POST /fp/done {seq}
-C:  (sleep ~FP_TST so the orchestrator is idle during the window),
+C:  (sleep ~TST so the orchestrator is idle during the window),
     then poll /fp/state until done_seq == seq
 C:  SIGKILL the stressor + reap
-C:  cooldown 5 s (let the L3 return to baseline)
+C:  cooldown COOLDOWN_US (default 500000 us = 0.5 s; let the L3 return to baseline)
    ─────────────────────
 
 C: POST /fp/cmd {stop}  ->  tear down Chrome
@@ -99,12 +99,12 @@ C: POST /fp/cmd {stop}  ->  tear down Chrome
 Sampling is **stressor-by-stressor**, not batch-by-stressor:
 
 ```
-for iter in 0..NUM_SAMPLES-1:        # outer = iteration
+for iter in 0..FP_SAMPLES-1:         # outer = iteration
     for stressor in battery:         # inner = stressor
         collect one sample
 ```
 
-So each stressor's `NUM_SAMPLES` samples are spread across the whole run instead of taken
+So each stressor's samples are spread across the whole run instead of taken
 in one contiguous block. This prevents the classifier from fingerprinting a slowly drifting
 machine state instead of the stressor itself.
 
@@ -112,11 +112,31 @@ machine state instead of the stressor itself.
 
 ## 6. Configuration & output
 
-- **NoC** is a command-line argument to the orchestrator (`./FingerprintOrchestrator <NoC>`),
-  a power of two in `[1, 64]`. One lazy mapping per invocation.
-- **`NUM_SAMPLES`** (samples per stressor) is a `#define` in the orchestrator (default 50).
-- Sampling params baked into the Chrome URL label: `FP_TST` (sampling seconds),
-  `FP_K`, `FP_CYCLES` → label `fp_{NoC}C_{TST}TST_{K}K_{cycles}cycles`.
+Every experiment parameter is declared in the Configuration block at the top of
+`run_fingerprint_sweep.sh` — the Stage 3 counterpart of `run_all_configs.sh`. Nothing needs a
+recompile to change an experiment.
+
+- **`NOCS`**, **`TST`**, **`K`**, **`CYCLES_PER_ADDRESS`** are composed into one **config label**
+  per NoC, `{NoC}C_{TST}TST_{K}K_{cycles}cycles`, which is the orchestrator's only argument
+  (`./FingerprintOrchestrator 16C_2TST_0K_4576cycles`). It is parsed with the same
+  `parse_*_from_dirname()` helpers the native sampler uses on its output dir name, so a label
+  means exactly one thing project-wide. NoC must be a power of two in `[1, 64]`; one lazy
+  mapping per invocation. A bare NoC (`./FingerprintOrchestrator 64`) still works and falls back
+  to the compiled-in defaults.
+- **`SAMPLES_PER_CLASS`** and **`SAMPLE_COOLDOWN_US`** are not part of the label (they do not shape
+  a trace), so they are passed as optional positional args:
+  `sudo ./FingerprintOrchestrator <config> [SAMPLES] [COOLDOWN_US]`. Defaults 50 and 500000 us
+  (= 0.5 s); the `FP_SAMPLES` / `FP_COOLDOWN_US` environment variables are the fallback when an arg
+  is omitted. **`COOLDOWN_US` is in MICROSECONDS** — `NOC_COOLDOWN_S` in the sweep script is the
+  only cooldown still expressed in seconds (it feeds bash's `sleep`).
+  **Why args and not `sudo env VAR=…`** (the mechanism `run_all_configs.sh` uses for
+  `JSMAP_BUF_MB`): the sudoers rule grants `NOPASSWD` on the orchestrator binary, which covers any
+  arguments, whereas `sudo env` would additionally need `/usr/bin/env` in sudoers — and `sudo env`
+  can exec anything as root, so that is effectively `NOPASSWD: ALL`. Arguments keep the sweep
+  unattended without weakening sudo.
+- The same tuple is baked into the Chrome URL label `fp_{NoC}C_{TST}TST_{K}K_{cycles}cycles`,
+  which `main.js` parses into `NUM_OF_CLUSTERS` / `MEASUREMENT_TIME_MS` / `K` /
+  `CYCLES_PER_ADDRESS`. `K = 0` selects the dynamic-K sweep.
 - The orchestrator passes a `config` string `realbrowser_{NoC}C_{TST}TST_{K}K_{cycles}cycles`
   with each sample command; the server writes to:
 
@@ -125,7 +145,26 @@ machine state instead of the stressor itself.
   ```
 
   with `<n>` auto-incremented (re-runs append). This is distinct from the native C tool's
-  `stable/data/{native,chrome}_clock/...`.
+  `stable/data/{native,chrome}_clock/...`. The `realbrowser_` tag matters: a manual single-shot
+  browser run sets its own metadata and writes a **bare** `{NoC}C_...` dir under the same root,
+  so the tag keeps it out of a sweep's class dirs.
+
+### Finalize (h5 + backup)
+
+After a **fully successful** sweep, `run_fingerprint_sweep.sh` calls `finalize_realbrowser.sh`,
+which packs every NoC's CSVs into ONE `.h5` (inner groups = NoCs, `X` shaped `(samples, G, T)`),
+deletes the source CSVs, and rsyncs the `.h5` to the remote archive, keeping the local copy:
+
+```
+stable/h5/realbrowser_{TST}TST_{K}K_{cycles}cycles.h5      # realbrowser2_… on the next rerun
+```
+
+If any NoC run failed, finalize is skipped and **all** CSVs are kept for a retry. The CSVs are
+deleted only after `csv_to_h5.py` has reopened and verified the `.h5`. `DO_FINALIZE=0` skips the
+step; `DRY_RUN=1` reports the plan without writing, deleting, or transferring anything.
+
+`finalize_realbrowser.sh` and the native `finalize_experiment.sh` are thin naming front-ends over
+the shared `finalize_lib.sh`, so the two paths cannot drift apart.
 
 ---
 
@@ -133,19 +172,29 @@ machine state instead of the stressor itself.
 
 ```bash
 cd stable
-./run_fingerprint_sweep.sh        # starts the server (conda base, core 2),
-                                  # then sweeps NoC = 1 2 4 8 16 32 64
+./run_fingerprint_sweep.sh        # starts the server (conda base, core 2), sweeps $NOCS,
+                                  # then packs -> deletes CSVs -> backs up the .h5
 ```
 
-The script grants root access to the `:0` X display (`xhost`), builds the orchestrator,
-starts the Flask coordinator, and runs `sudo ./FingerprintOrchestrator <NoC>` for each NoC.
+Edit the Configuration block at the top of the script to change the experiment. The script
+validates the whole parameter block up front (so a bad tuple costs seconds, not a mislabelled
+multi-hour run), grants root access to the `:0` X display (`xhost`), builds the orchestrator,
+starts the Flask coordinator, and runs `sudo ./FingerprintOrchestrator <config>` for each NoC,
+teeing each run to `stable/fp_logs/`.
 Run it as the normal user (it `sudo`s only the orchestrator, which pins cores and launches
 Chrome as root). A single Ctrl-C stops the sweep and tears everything down.
 
 To run one NoC directly (server must already be up):
 
 ```bash
-sudo ./FingerprintOrchestrator 64
+sudo ./FingerprintOrchestrator 64C_2TST_0K_4576cycles 50 500000
+```
+
+and to finalize a sweep by hand afterwards (same env knobs as the sweep script):
+
+```bash
+DRY_RUN=1 ./finalize_realbrowser.sh <TST> <K> <CYCLES> <NoC...>   # inspect the plan
+./finalize_realbrowser.sh 2 0 4576 1 2 4 8 16 32 64               # build + delete + backup
 ```
 
 Health check while running: `curl -s localhost:8080/fp/state` — `seq` climbs by one per

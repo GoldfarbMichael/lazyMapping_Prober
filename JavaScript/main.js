@@ -17,6 +17,11 @@ const SAVE_SWEEP_URL = "http://localhost:8080/saveSweepTimes"; // persist /check
 // orchestrator. Browser reports readiness, polls for sample requests, acks completion.
 const FP_READY_URL = "http://localhost:8080/fp/ready";
 const FP_POLL_URL = "http://localhost:8080/fp/poll";
+// Posted immediately BEFORE the synchronous sampling loop. website_orchestrator.c blocks on
+// it and only then opens the victim tab, so a page load lands at t=0 of the trace. It also
+// gets us past background-tab throttling: creating the victim tab backgrounds this one, and
+// a throttled /fp/poll could otherwise delay the start of sampling by up to a minute.
+const FP_STARTED_URL = "http://localhost:8080/fp/started";
 const FP_DONE_URL = "http://localhost:8080/fp/done";
 
 // ----- Experiment label (drives sampling params + storage path) -----
@@ -571,6 +576,13 @@ async function runFingerprint() {
 
         if (cmd === "sample" && seq > lastSeq) {
             setStatus(`fingerprint: sampling seq=${seq}`);
+            // Announce the start BEFORE the loop. This is the last network call until the
+            // sample is done -- awaiting it keeps the "no network during sampling" rule.
+            await fetch(FP_STARTED_URL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ seq: seq })
+            }).catch(err => console.error("fp/started failed:", err));
             // Sample against the prebuilt mapping -- synchronous, zero network calls.
             const result = sampleMemorygram(mapping);
             const csv = memorygramToCsv(result.memorygram, NUM_OF_CLUSTERS);
