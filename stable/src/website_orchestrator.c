@@ -522,6 +522,26 @@ int main(int argc, char **argv) {
 
             // 0. Liveness check OUTSIDE the trace window (see header).
             if (!cdp_alive()) {
+                // Report HOW the browser died, not just that it did. Without this the log only
+                // ever says "DevTools is gone", which cannot distinguish a normal exit from a
+                // kill (OOM/watchdog) -- the difference that decides what to fix.
+                int st;
+                pid_t r = waitpid((pid_t)chrome_pid, &st, WNOHANG);
+                if (r == (pid_t)chrome_pid) {
+                    if (WIFSIGNALED(st))
+                        fprintf(stderr, "[web] chrome pid %d was KILLED by signal %d (%s)\n",
+                                (int)chrome_pid, WTERMSIG(st), strsignal(WTERMSIG(st)));
+                    else if (WIFEXITED(st))
+                        fprintf(stderr, "[web] chrome pid %d exited normally with status %d\n",
+                                (int)chrome_pid, WEXITSTATUS(st));
+                } else if (r == 0) {
+                    fprintf(stderr, "[web] chrome pid %d is still alive but its DevTools port is "
+                                    "unreachable (browser process wedged, not dead)\n",
+                            (int)chrome_pid);
+                } else {
+                    fprintf(stderr, "[web] chrome pid %d already reaped (waitpid: %s)\n",
+                            (int)chrome_pid, strerror(errno));
+                }
                 fprintf(stderr, "[web] FATAL: Chrome/DevTools is gone; aborting so the run does "
                                 "not fill with victim-less traces. CSVs so far are intact.\n");
                 web_cleanup(0);

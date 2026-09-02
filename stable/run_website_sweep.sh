@@ -46,22 +46,22 @@ SCRIPT_DIR="$(pwd)"
 # Configuration — the experiment parameters
 # ============================================
 # Spatial sweep: one orchestrator run per NoC. Powers of two in [1,64] (the Lazy Mapping regime).
-# NOCS=(1 2 4 8 16 32 64)
-NOCS=(1)
+NOCS=(1 2 4 8 16 32 64)
+# NOCS=(1)
 
 # NOCS=(16)
 
 # Total sampling time per trace, in seconds ("{N}TST"). Unlike stress-ng, a page load is a
 # TRANSIENT: the discriminative signal is concentrated in the first seconds after navigation,
 # which is why the orchestrator aligns t=0 to navigation start. 6 s comfortably covers a load.
-TST=15
+TST=2
 # Accesses between timer polls ("{N}K"); 0 selects the DYNAMIC-K sweep.
 K=180
 # Cycles per address ("{N}cycles"); sizes the JS cluster quantum, so it sets temporal resolution:
 # rows T = floor(TST_ms / (Q * NoC)).
 CYCLES_PER_ADDRESS=2288
 # Samples collected per SITE, per NoC.
-SAMPLES_PER_CLASS=50
+SAMPLES_PER_CLASS=100
 # Cooldown between samples, MICROSECONDS (500000 = 0.5 s).
 SAMPLE_COOLDOWN_US=500000
 # Settle time between NoC runs (after tearing down that run's Chrome profile).
