@@ -16,7 +16,7 @@
 # only the `rm` of the root-owned CSVs stays as root.
 #
 # Usage:
-#   finalize_experiment.sh <TIMER_MODE> <SHUFFLE_FLAG> <TST> <CPA> <JSMAP_BUF_MB> <NoC...>
+#   finalize_experiment.sh <TIMER_MODE> <SHUFFLE_FLAG> <TST> <CPA> <JSMAP_BUF_MB> <K> <NoC...>
 # Config via environment (exported by the caller; defaults in finalize_lib.sh):
 #   REMOTE_HOST REMOTE_USER REMOTE_DIR PYTHON_BIN LOCAL_H5_DIR DRY_RUN
 #
@@ -25,11 +25,11 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Args
 # ---------------------------------------------------------------------------
-if [ "$#" -lt 6 ]; then
-    echo "usage: $0 <TIMER_MODE> <SHUFFLE_FLAG> <TST> <CPA> <JSMAP_BUF_MB> <NoC...>" >&2
+if [ "$#" -lt 7 ]; then
+    echo "usage: $0 <TIMER_MODE> <SHUFFLE_FLAG> <TST> <CPA> <JSMAP_BUF_MB> <K> <NoC...>" >&2
     exit 2
 fi
-TIMER_MODE="$1"; SHUFFLE_FLAG="$2"; TST="$3"; CPA="$4"; JSMAP_BUF_MB="$5"; shift 5
+TIMER_MODE="$1"; SHUFFLE_FLAG="$2"; TST="$3"; CPA="$4"; JSMAP_BUF_MB="$5"; K="$6"; shift 6
 NOCS=("$@")
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,53 +38,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # 1. Resolve the on-disk clock_subdir (mirror timer_mode_subdir() in mastikElite.c EXACTLY:
 #    base per mode, + "_<N>MB" iff JSMAP_BUF_MB != 12; chrome_clock_shuffled for -c -s).
 # ---------------------------------------------------------------------------
-case "$TIMER_MODE" in
-    -c)   CLOCK_SUBDIR="chrome_clock" ;;
-    -j)   CLOCK_SUBDIR="chrome_clock_jsmap" ;;
-    -jn)  CLOCK_SUBDIR="native_clock_jsmap" ;;
-    -jb)  CLOCK_SUBDIR="chrome_clock_jsmap_bidir" ;;
-    -jnb) CLOCK_SUBDIR="native_clock_jsmap_bidir" ;;
-    -jss)  CLOCK_SUBDIR="chrome_clock_jsmapSS" ;;
-    -jssb) CLOCK_SUBDIR="chrome_clock_jsmapSS_bidir" ;;
-    -jnss)  CLOCK_SUBDIR="native_clock_jsmapSS" ;;
-    -jnssb) CLOCK_SUBDIR="native_clock_jsmapSS_bidir" ;;
-    *)    CLOCK_SUBDIR="native_clock" ;;
-esac
-if [ "$TIMER_MODE" = "-c" ] && [ "$SHUFFLE_FLAG" = "-s" ]; then
-    CLOCK_SUBDIR="chrome_clock_shuffled"
-fi
-case "$TIMER_MODE" in
-    -j|-jn|-jb|-jnb|-jss|-jssb|-jnss|-jnssb)
-        if [ "$JSMAP_BUF_MB" != "12" ]; then CLOCK_SUBDIR="${CLOCK_SUBDIR}_${JSMAP_BUF_MB}MB"; fi ;;
-esac
+# shellcheck source=clock_labels.sh
+source "$SCRIPT_DIR/clock_labels.sh"
+CLOCK_SUBDIR="$(clock_subdir_for "$TIMER_MODE" "$SHUFFLE_FLAG" "$JSMAP_BUF_MB")"
 DATA_ROOT="$SCRIPT_DIR/data/$CLOCK_SUBDIR"
 
-# Config dir names for this sweep. "90K" is the literal used by run_all_configs.sh.
+# Config dir names for this sweep. K comes from the caller now (it used to be the literal 90),
+# so a dynamic-K sweep (K=0) finalizes its own tree instead of looking for a 90K one.
 CONFIG_DIRS=()
 for noc in "${NOCS[@]}"; do
-    CONFIG_DIRS+=("${noc}C_${TST}TST_90K_${CPA}cycles")
+    CONFIG_DIRS+=("${noc}C_${TST}TST_${K}K_${CPA}cycles")
 done
 
 # ---------------------------------------------------------------------------
 # 2. Friendly clock label for the h5 filename (distinct from the on-disk tree name).
 # ---------------------------------------------------------------------------
-case "$TIMER_MODE" in
-    -c)   CLOCK_LABEL="chrome" ;;
-    -j)   CLOCK_LABEL="chromeJSmap" ;;
-    -jn)  CLOCK_LABEL="nativeJSmap" ;;
-    -jb)  CLOCK_LABEL="chromeJSmapBidir" ;;
-    -jnb) CLOCK_LABEL="nativeJSmapBidir" ;;
-    -jss)  CLOCK_LABEL="chromeJSmapSS" ;;
-    -jssb) CLOCK_LABEL="chromeJSmapSSBidir" ;;
-    -jnss)  CLOCK_LABEL="nativeJSmapSS" ;;
-    -jnssb) CLOCK_LABEL="nativeJSmapSSBidir" ;;
-    *)    CLOCK_LABEL="native" ;;
-esac
-if [ "$TIMER_MODE" = "-c" ] && [ "$SHUFFLE_FLAG" = "-s" ]; then
-    CLOCK_LABEL="chromeShuffled"
-fi
+CLOCK_LABEL="$(clock_label_for "$TIMER_MODE" "$SHUFFLE_FLAG")"
+
 # Suffix that pins the parameter tuple; the h5 name ALWAYS carries _<BUF>MB (unlike the tree).
-NAME_TAIL="_${TST}TST_90K_${CPA}cycles_${JSMAP_BUF_MB}MB.h5"
+NAME_TAIL="_${TST}TST_${K}K_${CPA}cycles_${JSMAP_BUF_MB}MB.h5"
 
 # ---------------------------------------------------------------------------
 # 3. Hand off to the shared machinery.

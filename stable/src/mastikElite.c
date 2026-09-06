@@ -520,7 +520,29 @@ Clusters_t* eviction_sets_to_Clusters(void ***e_sets, int num_sets, int NoC) {
  *               No allocation/initialization is performed here to avoid overhead.
  * @param filename Output CSV file to write the matrix data
  */
-void get_spatioTemporal_memoryGram(Clusters_t *Clusters, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename){
+// Lines in cluster `c` (counts[] holds eviction SETS, not lines, and assoc is not in scope
+// here). Walked once at setup, never in the hot loop. Returns 0 for an empty cluster.
+static int cluster_line_count(Clusters_t *Clusters, int c) {
+    void *head = Clusters->clusterHeads[c];
+    if (!head) return 0;
+    int n = 0;
+    void *cu = head;
+    do { n++; cu = LNEXT(cu); } while (cu != head);
+    return n;
+}
+
+// Dynamic-K first batch: ~4 full sweeps of one cluster, matching the jsmap samplers'
+// nodeCounts[0]*4 and JS sampleMemorygram's initialK.
+static uint32_t dynamic_initial_k(Clusters_t *Clusters) {
+    int lines = cluster_line_count(Clusters, 0);
+    uint32_t k = (uint32_t)(lines * 4);
+    return (k < MIN_DYNAMIC_K) ? (uint32_t)MIN_DYNAMIC_K : k;
+}
+
+// K = accesses between clock polls, from the config label's "{K}K" field.
+//   K > 0  -> fixed cadence (K == 1 reproduces the original poll-every-access loop)
+//   K == 0 -> DYNAMIC K, mirroring the jsmap samplers and JS sweepClusterDynamicK
+void get_spatioTemporal_memoryGram(Clusters_t *Clusters, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename, int K){
     if (!Clusters) {
         fprintf(stderr, "FATAL: Clusters is NULL.\n");
         return;
@@ -533,7 +555,8 @@ void get_spatioTemporal_memoryGram(Clusters_t *Clusters, int NoC, uint64_t TST_c
 
     // 1. Calculate matrix dimensions
     uint64_t total_samples_per_cluster = TST_cycles / (NoC * SST_cycles);
-    
+    uint32_t initialK = (K == 0) ? dynamic_initial_k(Clusters) : 0;
+
     // 2. Spatio-Temporal Sampling Phase (Strictly NO I/O here)
     for (uint64_t s = 0; s < total_samples_per_cluster; s++) {
         for (int c = 0; c < NoC; c++) {
@@ -551,13 +574,42 @@ void get_spatioTemporal_memoryGram(Clusters_t *Clusters, int NoC, uint64_t TST_c
             // Set the timer constraint for this cluster
             uint64_t start_cluster = rdtscp64();
             uint64_t end_cluster = start_cluster + SST_cycles;
-            
-            // Polling Loop - traverse cluster's circular linked list using LNEXT
-            while (rdtscp64() < end_cluster) {
-                // Access the cache line at curr
-                maccessMy(curr);
-                curr = LNEXT(curr);
-                count++;
+
+            if (K != 0) {
+                // FIXED-K: poll rdtscp64 every K accesses. K == 1 is the original
+                // poll-every-access loop, bit for bit.
+                int check_count = 0;
+                while (1) {
+                    maccessMy(curr);
+                    curr = LNEXT(curr);
+                    count++;
+                    if (++check_count == K) {
+                        if (rdtscp64() >= end_cluster) break;
+                        check_count = 0;
+                    }
+                }
+            } else {
+                // DYNAMIC-K: start with ~4 cluster sweeps, then size each batch to a damped
+                // (x0.5) fraction of the remaining time, floored at MIN_DYNAMIC_K. The clock is
+                // read ~5-9 times per quantum instead of once per access. Units are CYCLES here
+                // (native clock), microseconds in the mock twin -- the ratio math is unitless.
+                uint64_t prev = start_cluster;
+                uint32_t k = initialK;
+                for (;;) {
+                    for (uint32_t i = 0; i < k; i++) { maccessMy(curr); curr = LNEXT(curr); }
+                    count += k;
+                    uint64_t now = rdtscp64();
+                    if (now >= end_cluster) break;
+                    uint64_t batch = now - prev;
+                    prev = now;
+                    uint64_t remaining = end_cluster - now;
+                    if (batch > 0) {
+                        uint64_t kn = ((uint64_t)k * remaining) / batch / 2;
+                        k = (kn > (uint64_t)MIN_DYNAMIC_K) ? (uint32_t)kn : (uint32_t)MIN_DYNAMIC_K;
+                    } else {
+                        k = MIN_DYNAMIC_K;
+                    }
+                }
             }
             
             // Store the access count
@@ -569,7 +621,9 @@ void get_spatioTemporal_memoryGram(Clusters_t *Clusters, int NoC, uint64_t TST_c
     FILE *fp = fopen(filename, "w");
     if (!fp) {
         fprintf(stderr, "FATAL: Could not open output file %s\n", filename);
-        free_Clusters(Clusters);
+        // NB: do NOT free Clusters here. The caller owns it and reuses it for every
+        // subsequent sample, so freeing on a transient I/O error turned one failed CSV
+        // write into a use-after-free for the whole rest of the run.
         return;
     }
 
@@ -594,7 +648,9 @@ void get_spatioTemporal_memoryGram(Clusters_t *Clusters, int NoC, uint64_t TST_c
 
 
 
-void get_spatioTemporal_memoryGram_ChromeMock(Clusters_t *Clusters, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename){
+// Mock-clock twin of the above. Same K semantics; the clock is chrome_mock_timer (microseconds,
+// 100 us clamp) instead of rdtscp64.
+void get_spatioTemporal_memoryGram_ChromeMock(Clusters_t *Clusters, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename, int K){
     if (!Clusters) {
         fprintf(stderr, "FATAL: Clusters is NULL.\n");
         return;
@@ -608,6 +664,7 @@ void get_spatioTemporal_memoryGram_ChromeMock(Clusters_t *Clusters, int NoC, uin
     // 1. Calculate matrix dimensions
     uint64_t total_samples_per_cluster = TST_cycles / (NoC * SST_cycles);
     uint64_t SST_us = (SST_cycles *1000000)/g_tsc_freq_hz;  // Convert SST_cycles to microseconds for mock timer
+    uint32_t initialK = (K == 0) ? dynamic_initial_k(Clusters) : 0;
     
     // 2. Spatio-Temporal Sampling Phase (Strictly NO I/O here)
     for (uint64_t s = 0; s < total_samples_per_cluster; s++) {
@@ -627,25 +684,38 @@ void get_spatioTemporal_memoryGram_ChromeMock(Clusters_t *Clusters, int NoC, uin
             uint64_t start_cluster = chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed);
             uint64_t end_cluster = start_cluster + SST_us;
             
-            // Polling Loop - traverse cluster's circular linked list using LNEXT
-            // while (chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed) < end_cluster) {
-            //     // Access the cache line at curr
-            //     maccessMy(curr);
-            //     curr = LNEXT(curr);
-            //     count++;
-            // }
-            int check_count = 0;
-
-            while (1) {
-                maccessMy(curr);
-                curr = LNEXT(curr);
-                count++;
-                
-                if (++check_count == ACCESSES_TILL_TIMER_POLL) {
-                    if (chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed) >= end_cluster) {
-                        break;
+            if (K != 0) {
+                // FIXED-K: poll the mock clock every K accesses (K from the config label).
+                int check_count = 0;
+                while (1) {
+                    maccessMy(curr);
+                    curr = LNEXT(curr);
+                    count++;
+                    if (++check_count == K) {
+                        if (chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed) >= end_cluster) {
+                            break;
+                        }
+                        check_count = 0;
                     }
-                    check_count = 0;
+                }
+            } else {
+                // DYNAMIC-K: see the native twin. Units are microseconds here.
+                uint64_t prev = start_cluster;
+                uint32_t k = initialK;
+                for (;;) {
+                    for (uint32_t i = 0; i < k; i++) { maccessMy(curr); curr = LNEXT(curr); }
+                    count += k;
+                    uint64_t now = chrome_mock_timer(g_tsc_freq_hz, g_context_seed, g_secret_seed);
+                    if (now >= end_cluster) break;
+                    uint64_t batch_us = now - prev;
+                    prev = now;
+                    uint64_t remaining = end_cluster - now;
+                    if (batch_us > 0) {
+                        uint64_t kn = ((uint64_t)k * remaining) / batch_us / 2;
+                        k = (kn > (uint64_t)MIN_DYNAMIC_K) ? (uint32_t)kn : (uint32_t)MIN_DYNAMIC_K;
+                    } else {
+                        k = MIN_DYNAMIC_K;  // batch finished within the clock's ~100us clamp
+                    }
                 }
             }
 
@@ -659,7 +729,9 @@ void get_spatioTemporal_memoryGram_ChromeMock(Clusters_t *Clusters, int NoC, uin
     FILE *fp = fopen(filename, "w");
     if (!fp) {
         fprintf(stderr, "FATAL: Could not open output file %s\n", filename);
-        free_Clusters(Clusters);
+        // NB: do NOT free Clusters here. The caller owns it and reuses it for every
+        // subsequent sample, so freeing on a transient I/O error turned one failed CSV
+        // write into a use-after-free for the whole rest of the run.
         return;
     }
 
@@ -1198,7 +1270,7 @@ static int lazy_buf_size(char *suffixOut, size_t suffixCap) {
     return mb / 12;
 }
 
-static const char* timer_mode_subdir(int timer_mode) {
+const char* timer_mode_subdir(int timer_mode) {
     // Non-default buffer sizes get their own tree (_<N>MB) so a 24 MB run can never overwrite
     // previously collected 12 MB data. Only the jsmap modes (2..5) use the lazy map at all.
     static char buf[64];
@@ -1213,6 +1285,9 @@ static const char* timer_mode_subdir(int timer_mode) {
         case 7:  base = "chrome_clock_jsmapSS_bidir"; break;
         case 8:  base = "native_clock_jsmapSS"; break;
         case 9:  base = "native_clock_jsmapSS_bidir"; break;
+        // Stage 4b: native Mastik sampler, real-website victim (website_prober.c).
+        case 10: base = "native_clock_website"; break;
+        case 11: base = "chrome_clock_website"; break;
         default: base = "native_clock"; break;
     }
     if (timer_mode < 2 || timer_mode > 9) return base;   // non-jsmap modes: no buffer to tag
@@ -1403,10 +1478,17 @@ int runStressNG_batches(double tst_sec, int batch_size, int start_iteration, cha
             // Choose measurement function based on timer_mode
             switch(timer_mode) {
                 case 0:  // Use rdtscp64()
-                    get_spatioTemporal_memoryGram(Clusters, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path);
+                    // K=1, NOT the label's K. This sampler polled rdtscp64 on EVERY access for
+                    // the whole Stage 1 native sweep, and the labels say "90K" -- honouring that
+                    // here would silently make new native_clock data incomparable with the
+                    // published tree. The website twin (timer_mode 10) is a new arm with no such
+                    // history and DOES follow the label.
+                    get_spatioTemporal_memoryGram(Clusters, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path, 1);
                     break;
                 case 1:  // Use chrome_mock_timer() with Mastik loaded-e_set clusters
-                    get_spatioTemporal_memoryGram_ChromeMock(Clusters, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path);
+                    // Label-driven now. Identical to the old hardcoded ACCESSES_TILL_TIMER_POLL
+                    // whenever the label says 90K, which every Stage 2 config does.
+                    get_spatioTemporal_memoryGram_ChromeMock(Clusters, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path, K);
                     break;
                 case 2:  // chrome_mock_timer() with the JS-style lazy-map victim, forward-only
                     get_spatioTemporal_memoryGram_ChromeMock_jsmap(&jmap, NoC, TST_cycles, SST_cycles, matrix, dynamic_output_path, K, /*bidir=*/0);

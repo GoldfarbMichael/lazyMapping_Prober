@@ -63,6 +63,7 @@
 
 #include "mastikElite.h"   // parse_*_from_dirname
 #include "fp_ctl.h"        // raw-socket HTTP + JSON scalars (shared with fingerprint_orchestrator.c)
+#include "web_victim.h"    // site list + Chrome + CDP victim tab (shared with website_prober.c)
 
 // DEFAULTS ONLY. The sampling tuple normally comes from the config label (argv[1]); these
 // apply to the bare-NoC form. Every one is a RUNTIME value below -- do not reintroduce
@@ -90,16 +91,7 @@
 // distinctive -- so silent drift here would quietly degrade every trace in a long run.
 #define ALIGN_WARN_MS   150
 
-#define MAX_SITES     512
-#define MAX_SLUG_LEN   64
-#define MAX_URL_LEN   512
-
-typedef struct {
-    char slug[MAX_SLUG_LEN];   // class label -> data/{config}/{slug}/{n}.csv
-    char url[MAX_URL_LEN];     // what the victim tab navigates to
-} Site;
-
-static Site  sites[MAX_SITES];
+static Site  sites[WEB_MAX_SITES];   // Site, the caps, and the loader live in web_victim.h
 static int   num_sites = 0;
 
 // Set once launch_chrome() returns, so the signal handler can tear the browser down.
@@ -170,138 +162,28 @@ static void usage(const char *prog) {
 }
 
 // ---------------------------------------------------------------------------
-// Site list
-// ---------------------------------------------------------------------------
-
-// A slug becomes a DIRECTORY NAME at server.py's /collect and a label_map key in the .h5,
-// so restrict it to what is safe on both sides. A '/' would make os.path.join() build a
-// nested path that csv_to_h5.py's one-level class scan cannot see; a leading '/' would make
-// it discard the data root entirely.
-static int slug_ok(const char *s) {
-    if (!*s) return 0;
-    for (const char *p = s; *p; p++)
-        if (!isalnum((unsigned char)*p) && *p != '.' && *p != '_' && *p != '-') return 0;
-    return 1;
-}
-
-// Load '<slug>\t<url>' lines, skipping blanks and '#' comments. Returns the count, or -1.
-// Every rejection is fatal and reported with a line number: a malformed list must cost
-// seconds here, not a multi-hour run that writes a mislabelled tree.
-static int site_list_load(const char *path) {
-    FILE *f = fopen(path, "r");
-    if (!f) {
-        fprintf(stderr, "[web] ERROR: cannot open sites file '%s': %s\n", path, strerror(errno));
-        return -1;
-    }
-    char line[1024];
-    int lineno = 0, n = 0;
-    while (fgets(line, sizeof(line), f)) {
-        lineno++;
-        char *p = line;
-        while (*p == ' ' || *p == '\t') p++;
-        if (*p == '#' || *p == '\n' || *p == '\r' || *p == '\0') continue;
-
-        line[strcspn(line, "\r\n")] = '\0';
-        char *slug = p;
-        char *sep = slug + strcspn(slug, " \t");
-        if (*sep == '\0') {
-            fprintf(stderr, "[web] ERROR: %s:%d: expected '<slug><TAB><url>', got '%s'\n",
-                    path, lineno, slug);
-            fclose(f); return -1;
-        }
-        *sep++ = '\0';
-        while (*sep == ' ' || *sep == '\t') sep++;
-        if (*sep == '\0') {
-            fprintf(stderr, "[web] ERROR: %s:%d: missing URL for slug '%s'\n", path, lineno, slug);
-            fclose(f); return -1;
-        }
-
-        if (n >= MAX_SITES) {
-            fprintf(stderr, "[web] ERROR: %s:%d: more than %d sites\n", path, lineno, MAX_SITES);
-            fclose(f); return -1;
-        }
-        if (!slug_ok(slug)) {
-            fprintf(stderr, "[web] ERROR: %s:%d: slug '%s' must match [A-Za-z0-9._-]+ "
-                            "(it becomes a directory name and an .h5 label)\n", path, lineno, slug);
-            fclose(f); return -1;
-        }
-        if (strlen(slug) >= MAX_SLUG_LEN || strlen(sep) >= MAX_URL_LEN) {
-            fprintf(stderr, "[web] ERROR: %s:%d: slug or URL too long\n", path, lineno);
-            fclose(f); return -1;
-        }
-        // Duplicate slugs would silently merge two sites into one class dir -- the samples
-        // would interleave and the class would be unlabelable after the fact.
-        for (int i = 0; i < n; i++) {
-            if (strcmp(sites[i].slug, slug) == 0) {
-                fprintf(stderr, "[web] ERROR: %s:%d: duplicate slug '%s' (also line for '%s')\n",
-                        path, lineno, slug, sites[i].url);
-                fclose(f); return -1;
-            }
-        }
-        snprintf(sites[n].slug, sizeof(sites[n].slug), "%s", slug);
-        snprintf(sites[n].url,  sizeof(sites[n].url),  "%s", sep);
-        n++;
-    }
-    fclose(f);
-    if (n < 2) {
-        fprintf(stderr, "[web] ERROR: %s has %d uncommented site(s); need at least 2 to "
-                        "fingerprint\n", path, n);
-        return -1;
-    }
-    return n;
-}
-
-// ---------------------------------------------------------------------------
 // Chrome
 // ---------------------------------------------------------------------------
 
+// The Stage 4 JS arm runs UNPRIVILEGED and UNPINNED, so it takes web_victim's defaults for
+// both: no privilege drop (there is nothing to drop from) and no affinity mask (this process
+// was never pinned, so Chrome inherits an all-cores mask already).
 static pid_t launch_chrome(int noc, int tst, int k, int cycles) {
     char url[256];
     snprintf(url, sizeof(url),
              "http://localhost:%d/?mode=fingerprint&label=web_%dC_%dTST_%dK_%dcycles",
              FP_SERVER_PORT, noc, tst, k, cycles);
-    char dbg[64];
-    snprintf(dbg, sizeof(dbg), "--remote-debugging-port=%d", FP_CDP_PORT);
-
-    pid_t pid = fork();
-    if (pid == 0) {
-        // No pin_to_core: Chrome is deliberately free to spread across all cores (see header).
-        // Respect an operator-supplied value, but only a NON-EMPTY one: setenv(...,0) alone
-        // would honour a set-but-empty DISPLAY (common in non-login shells and cron) and hand
-        // Chrome an unusable display.
-        const char *disp = getenv("DISPLAY");
-        if (!disp || !*disp) setenv("DISPLAY", ":0", 1);
-        // The :0 X server's auth cookie lives in gdm's Xauthority, not ~/.Xauthority (which
-        // is the :1 Xtigervnc cookie). It is owned by uid 1000, so running as the login user
-        // needs no `xhost +SI:localuser:root` -- unlike Stage 3, which ran Chrome as root.
-        const char *xa = getenv("XAUTHORITY");
-        if (!xa || !*xa) setenv("XAUTHORITY", "/run/user/1000/gdm/Xauthority", 1);
-        execlp("google-chrome", "google-chrome",
-               // NOTE: no --no-sandbox. We are not root, so the zygote sandbox works, and it
-               // is worth keeping while navigating to arbitrary live sites.
-               "--user-data-dir=" CHROME_PROFILE,
-               "--no-first-run", "--no-default-browser-check",
-               dbg,
-               // Guarantee the victim page gets its own renderer process, as it would in a
-               // real deployment.
-               "--site-per-process",
-               // The attacker tab is backgrounded the moment the victim tab opens. Without
-               // these, Chrome throttles its timers and deprioritises its renderer, and the
-               // /fp/poll loop stops picking up sample requests promptly.
-               "--disable-background-timer-throttling",
-               "--disable-backgrounding-occluded-windows",
-               "--disable-renderer-backgrounding",
-               "--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling,"
-                                  "SpareRendererForProcessPerSite",
-               // Suppress the HTTP disk cache so sample N of a site is not a warm-cache load
-               // that looks nothing like sample 0. DNS, TLS session resumption and connection
-               // reuse still warm up -- a limitation to document, not one this can fix.
-               "--disk-cache-size=1", "--media-cache-size=1",
-               "--new-window", url, (char *)NULL);
-        perror("execlp google-chrome");
-        _exit(127);
-    }
-    return pid;
+    WebVictimCfg cfg = {
+        .profile_dir  = CHROME_PROFILE,
+        .initial_url  = url,
+        .drop_privs   = 0,
+        .uid = 0, .gid = 0, .home = NULL,
+        .no_sandbox   = 0,   // not root -> the zygote sandbox works, and it is worth keeping
+                             // while navigating to arbitrary live sites
+        .set_affinity = 0,   // deliberately unpinned; see the header
+        .cpu_mask     = NULL,
+    };
+    return web_launch_chrome(&cfg);
 }
 
 // Tear down OUR Chrome (the whole process tree, matched by its profile dir), then exit.
@@ -312,7 +194,7 @@ static pid_t launch_chrome(int noc, int tst, int k, int cycles) {
 // this is the existing project pattern for a cleanup-then-exit handler.)
 static void web_cleanup(int sig) {
     (void)sig;
-    system("pkill -9 -f 'user-data-dir=/tmp/chrome-websit[e]'");
+    web_pkill_armed();
     _exit(130);
 }
 
@@ -374,60 +256,6 @@ static int wait_done(long seq) {
 }
 
 // ---------------------------------------------------------------------------
-// Victim tab (Chrome DevTools HTTP endpoint, :9222)
-// ---------------------------------------------------------------------------
-
-// Block until the DevTools endpoint answers. Returns 0, or -1 on timeout.
-static int wait_cdp(void) {
-    char resp[1024];
-    for (int s = 0; s < CDP_TIMEOUT_S; s++) {
-        if (fp_http_get(FP_CDP_PORT, "/json/version", resp, sizeof(resp)) == 0 &&
-            strstr(resp, "webSocketDebuggerUrl"))
-            return 0;
-        sleep(1);
-    }
-    return -1;
-}
-
-// Cheap liveness check, run OUTSIDE the trace window so a dead browser is caught before a
-// sample is requested rather than after a CSV has already been written for it.
-static int cdp_alive(void) {
-    char resp[1024];
-    return fp_http_get(FP_CDP_PORT, "/json/version", resp, sizeof(resp)) == 0 &&
-           strstr(resp, "webSocketDebuggerUrl") != NULL;
-}
-
-// Open `url` in a new tab; copy the target id into `id`. Returns 0, or -1.
-//
-// The URL is the RAW QUERY STRING: `PUT /json/new?<url>`. Passing it as `?url=<url>` is
-// accepted and silently opens about:blank instead -- verified against Chrome 150. The
-// method must be PUT (it was GET before Chrome 111).
-static int victim_open(const char *url, char *id, size_t id_len) {
-    char enc[MAX_URL_LEN * 3 + 1], path[MAX_URL_LEN * 3 + 32], resp[4096];
-    if (fp_url_encode(url, enc, sizeof(enc)) != 0) {
-        fprintf(stderr, "[web] ERROR: URL too long to encode: %s\n", url);
-        return -1;
-    }
-    snprintf(path, sizeof(path), "/json/new?%s", enc);
-    if (fp_http_request(FP_CDP_PORT, "PUT", path, NULL, NULL, resp, sizeof(resp)) != 0)
-        return -1;
-    if (fp_json_str(resp, "id", id, id_len) != 0) {
-        fprintf(stderr, "[web] ERROR: /json/new gave no target id (response: %.200s)\n", resp);
-        return -1;
-    }
-    return 0;
-}
-
-// Close the victim tab. Best-effort: a failure here leaks one tab, which the next sample's
-// fresh tab makes harmless, so it warns rather than aborting.
-static void victim_close(const char *id) {
-    char path[256], resp[512];
-    snprintf(path, sizeof(path), "/json/close/%s", id);
-    if (fp_http_get(FP_CDP_PORT, path, resp, sizeof(resp)) != 0)
-        fprintf(stderr, "[web] WARNING: failed to close target %s\n", id);
-}
-
-// ---------------------------------------------------------------------------
 
 int main(int argc, char **argv) {
     if (argc < 2) { usage(argv[0]); return 2; }
@@ -468,7 +296,7 @@ int main(int argc, char **argv) {
     if (cycles < 1)     { fprintf(stderr, "[web] ERROR: cycles/address must be >= 1, got %d\n", cycles); return 2; }
     if (num_samples < 1){ fprintf(stderr, "[web] ERROR: SAMPLES must be >= 1, got %d\n", num_samples); return 2; }
 
-    num_sites = site_list_load(sites_file);
+    num_sites = web_site_list_load(sites_file, sites, WEB_MAX_SITES);
     if (num_sites < 0) return 2;
 
     signal(SIGINT,  web_cleanup);
@@ -498,7 +326,7 @@ int main(int argc, char **argv) {
     printf("[web] launched chrome (pid %d, sandboxed, unpinned); waiting for mapping build...\n",
            (int)chrome_pid);
 
-    if (wait_cdp() != 0) {
+    if (web_wait_cdp(CDP_TIMEOUT_S) != 0) {
         fprintf(stderr, "[web] FATAL: DevTools endpoint never came up on :%d\n", FP_CDP_PORT);
         web_cleanup(0);
     }
@@ -521,27 +349,11 @@ int main(int argc, char **argv) {
             fflush(stdout);
 
             // 0. Liveness check OUTSIDE the trace window (see header).
-            if (!cdp_alive()) {
+            if (!web_cdp_alive()) {
                 // Report HOW the browser died, not just that it did. Without this the log only
                 // ever says "DevTools is gone", which cannot distinguish a normal exit from a
                 // kill (OOM/watchdog) -- the difference that decides what to fix.
-                int st;
-                pid_t r = waitpid((pid_t)chrome_pid, &st, WNOHANG);
-                if (r == (pid_t)chrome_pid) {
-                    if (WIFSIGNALED(st))
-                        fprintf(stderr, "[web] chrome pid %d was KILLED by signal %d (%s)\n",
-                                (int)chrome_pid, WTERMSIG(st), strsignal(WTERMSIG(st)));
-                    else if (WIFEXITED(st))
-                        fprintf(stderr, "[web] chrome pid %d exited normally with status %d\n",
-                                (int)chrome_pid, WEXITSTATUS(st));
-                } else if (r == 0) {
-                    fprintf(stderr, "[web] chrome pid %d is still alive but its DevTools port is "
-                                    "unreachable (browser process wedged, not dead)\n",
-                            (int)chrome_pid);
-                } else {
-                    fprintf(stderr, "[web] chrome pid %d already reaped (waitpid: %s)\n",
-                            (int)chrome_pid, strerror(errno));
-                }
+                web_diagnose_chrome_death((pid_t)chrome_pid);
                 fprintf(stderr, "[web] FATAL: Chrome/DevTools is gone; aborting so the run does "
                                 "not fill with victim-less traces. CSVs so far are intact.\n");
                 web_cleanup(0);
@@ -568,7 +380,7 @@ int main(int argc, char **argv) {
             // 3. Navigate. This is t = 0 of the trace.
             double t_started = now_ms();
             char id[128];
-            if (victim_open(url, id, sizeof(id)) != 0) {
+            if (web_victim_open(url, id, sizeof(id)) != 0) {
                 fprintf(stderr, "[web] FATAL: could not open victim tab for %s (%s).\n"
                                 "       The in-flight trace has no victim -- DELETE the newest CSV "
                                 "in data/%s/%s/ before reusing this tree.\n",
@@ -606,7 +418,7 @@ int main(int argc, char **argv) {
             }
 
             // 5. Close the victim tab: kills its renderer, and with it that page's memory cache.
-            victim_close(id);
+            web_victim_close(id);
 
             // 6. Cooldown so the L3 returns to baseline before the next trace.
             sleep_us(cooldown_us);
@@ -617,7 +429,7 @@ int main(int argc, char **argv) {
     fp_http_post(FP_SERVER_PORT, "/fp/cmd", "{\"cmd\":\"stop\"}", NULL, 0);
     if (chrome_pid > 0) kill((pid_t)chrome_pid, SIGTERM);
     sleep(1);
-    system("pkill -9 -f 'user-data-dir=/tmp/chrome-websit[e]'");
+    web_pkill_armed();
 
     printf("[web] collection complete: %d samples, %d failed.\n", collected, failed);
     // Nonzero exit makes run_website_sweep.sh count this NoC as failed and skip the finalize,

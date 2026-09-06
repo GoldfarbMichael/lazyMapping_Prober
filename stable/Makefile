@@ -19,7 +19,11 @@ LDFLAGS = -L$(MASTIK_DIR)/src -lmastik -lm
 
 # Project Files
 # Assuming you moved your code into a 'src' folder inside 'stable'
-SRCS = src/main.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c src/lazy_map.c
+# website_prober.c (+ web_victim.c, fp_ctl.c) adds the Stage 4b arm: native Mastik sampler,
+# real-website victim over CDP. Only THIS target links them -- CoverageValidator links
+# mastikElite.o but not fp_ctl.o, so the CDP dependency must not leak into mastikElite.c.
+SRCS = src/main.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c src/lazy_map.c \
+       src/website_prober.c src/web_victim.c src/fp_ctl.c
 OBJS = $(SRCS:.c=.o)
 
 # Executable Name
@@ -40,7 +44,7 @@ FP_OBJS = $(FP_SRCS:.c=.o)
 # Website orchestrator (Stage 4: drives Chrome JS sampling + real websites in a second tab).
 # Same object set as FP_SRCS (it needs mastikElite.c's parse_*_from_dirname) + its own main.
 WEB_TARGET = WebsiteOrchestrator
-WEB_SRCS = src/website_orchestrator.c src/fp_ctl.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c src/lazy_map.c
+WEB_SRCS = src/website_orchestrator.c src/fp_ctl.c src/web_victim.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c src/lazy_map.c
 WEB_OBJS = $(WEB_SRCS:.c=.o)
 
 # Build Rules

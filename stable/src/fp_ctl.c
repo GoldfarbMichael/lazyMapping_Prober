@@ -63,8 +63,17 @@ static long parse_content_length(const char *hdr, size_t hdr_len) {
     return -1;
 }
 
-int fp_http_request(int port, const char *method, const char *path,
-                    const char *ctype, const char *body, char *resp, int resp_len) {
+// Send half: connect + write the request, then RETURN without reading the reply.
+//
+// Split out of fp_http_request so a caller can overlap the peer's think-time with work of its
+// own -- website_prober.c fires the /json/new that opens a victim tab, then samples the cache
+// for the whole trace, then collects the reply. On loopback the connect and the write are
+// microseconds and cannot meaningfully block; ALL of the waiting in an HTTP round trip is in
+// the read, which is exactly what gets deferred.
+//
+// Returns a connected fd that the caller MUST hand to fp_http_recv (which closes it), or -1.
+int fp_http_send(int port, const char *method, const char *path,
+                 const char *ctype, const char *body) {
     int fd = ctl_connect(port);
     if (fd < 0) {
         fprintf(stderr, "[fp_ctl] connect :%d %s %s failed\n", port, method, path);
@@ -103,6 +112,17 @@ int fp_http_request(int port, const char *method, const char *path,
         free(req); close(fd); return -1;
     }
     free(req);
+    return fd;
+}
+
+// Receive half: drain the reply from a fd returned by fp_http_send, then close it. Always
+// closes, including on error, so a caller cannot leak the descriptor by mishandling failure.
+//
+// Safe to call long after fp_http_send: the peer's reply sits in the socket receive buffer
+// until read (a few hundred bytes against a >=128 KB buffer), and SO_RCVTIMEO bounds a single
+// read call -- it is not a deadline on the socket's lifetime, so an idle-held socket is fine.
+int fp_http_recv(int fd, char *resp, int resp_len) {
+    if (fd < 0) return -1;
 
     // Read the reply, stopping at Content-Length rather than at EOF.
     //
@@ -144,6 +164,15 @@ int fp_http_request(int port, const char *method, const char *path,
     free(acc);
     close(fd);
     return 0;
+}
+
+// The original one-shot call, now just its two halves back to back. Behaviour is unchanged for
+// every existing caller.
+int fp_http_request(int port, const char *method, const char *path,
+                    const char *ctype, const char *body, char *resp, int resp_len) {
+    int fd = fp_http_send(port, method, path, ctype, body);
+    if (fd < 0) return -1;
+    return fp_http_recv(fd, resp, resp_len);
 }
 
 int fp_http_get(int port, const char *path, char *resp, int resp_len) {

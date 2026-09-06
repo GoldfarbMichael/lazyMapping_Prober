@@ -1,5 +1,5 @@
 #!/bin/bash
-trap 'sudo pkill -9 stress-ng 2>/dev/null; sudo pkill -9 MastikElite 2>/dev/null' EXIT
+trap 'sudo pkill -9 stress-ng 2>/dev/null; sudo pkill -9 MastikElite 2>/dev/null; sudo pkill -9 -f "user-data-dir=/tmp/chrome-website-nativ[e]" 2>/dev/null' EXIT
 #set -e  # Exit on error
 
 # ============================================
@@ -18,6 +18,11 @@ OUTPUT_DIR="batch_logs"
 # These mirror the C program's inner cost in runStressNG_batches():
 NUM_STRESSORS=38       # entries in stress_battery[] (mastikElite.c) — keep in sync
 PER_SAMPLE_OVERHEAD=3  # per-sample cost ON TOP of TST: 1s cooldown + 50ms steady state + CSV write
+# Website modes (-wn/-wc) replace the 38 stressors with the site list, and each sample costs
+# more than a stress-ng one (CDP tab open + renderer teardown on top of the cooldown). Both are
+# resolved below, after the flags are parsed.
+WEB_PER_SAMPLE_OVERHEAD=4
+SITES_FILE="${SITES_FILE:-sites.txt}"
 INTER_ROUND_SECS=8     # sleep() between rounds in runStressNG_batches
 DEFAULT_TST_SECS=2     # TST_SEC in mastikElite.h; used only if the label has no {N}TST field
 # PER_SAMPLE_SECS is DERIVED from the config label's TST field below (the C tool parses the same
@@ -44,6 +49,8 @@ if [[ $# -eq 0 ]]; then
     echo "  -jssb           : -jss + BIDIRECTIONAL single sweep"
     echo "  -jnss           : Native rdtscp64 timer + JS lazy map SINGLE-SWEEP (idle-fill)"
     echo "  -jnssb          : -jnss + BIDIRECTIONAL single sweep"
+    echo "  -wn             : Native timer + Mastik clusters + REAL-WEBSITE victim"
+    echo "  -wc             : Chrome timer + Mastik clusters + REAL-WEBSITE victim"
     echo ""
     echo "Arguments:"
     echo "  CONFIG_DIR      : Configuration directory name (e.g., '16C_2TST_90K_2288cycles')"
@@ -71,6 +78,8 @@ while [[ "$1" == -* ]]; do
         -jssb) TIMER_MODE="-jssb"; echo "Timer Mode set to: Chrome Mock + JS-style lazy map SINGLE-SWEEP BIDIRECTIONAL (-jssb)"; shift ;;
         -jnss) TIMER_MODE="-jnss"; echo "Timer Mode set to: Native rdtscp64 + JS-style lazy map SINGLE-SWEEP (-jnss)"; shift ;;
         -jnssb) TIMER_MODE="-jnssb"; echo "Timer Mode set to: Native rdtscp64 + JS-style lazy map SINGLE-SWEEP BIDIRECTIONAL (-jnssb)"; shift ;;
+        -wn) TIMER_MODE="-wn"; echo "Timer Mode set to: Native rdtscp64 + Mastik clusters + WEBSITE victim (-wn)"; shift ;;
+        -wc) TIMER_MODE="-wc"; echo "Timer Mode set to: Chrome Mock + Mastik clusters + WEBSITE victim (-wc)"; shift ;;
         -s) SHUFFLE_FLAG="-s"; echo "Cluster shuffle: ON (-s; effective only with -c)"; shift ;;
         -h|--help)
             echo "Usage: $0 [-c|-n|-j|-jn|-jb|-jnb|-jss|-jssb|-jnss|-jnssb] [-s] CONFIG_DIR"
@@ -87,6 +96,10 @@ while [[ "$1" == -* ]]; do
             echo "  -jssb           : -jss + BIDIRECTIONAL (-> data/chrome_clock_jsmapSS_bidir/)"
             echo "  -jnss           : Native + JS lazy map SINGLE-SWEEP (-> data/native_clock_jsmapSS/)"
             echo "  -jnssb          : -jnss + BIDIRECTIONAL (-> data/native_clock_jsmapSS_bidir/)"
+            echo "  -wn             : Native timer, Mastik clusters, WEBSITE victim"
+            echo "                    (-> data/native_clock_website/)"
+            echo "  -wc             : Chrome timer, Mastik clusters, WEBSITE victim"
+            echo "                    (-> data/chrome_clock_website/)"
             echo "  -s              : Line-shuffle the Mastik clusters once (only with -c;"
             echo "                    -> data/chrome_clock_shuffled/)"
             echo "  -h, --help      : Show this help message"
@@ -95,7 +108,7 @@ while [[ "$1" == -* ]]; do
             echo "  CONFIG_DIR      : Configuration directory name (e.g., '16C_2TST_90K_2288cycles')"
             echo ""
             exit 0 ;;
-        *) echo "❌ Unknown flag: $1"; echo "Usage: $0 [-c|-n|-j|-jn] [-s] CONFIG_DIR"; exit 1 ;;
+        *) echo "❌ Unknown flag: $1"; echo "Usage: $0 [-c|-n|-j|-jn|-wn|-wc] [-s] CONFIG_DIR"; exit 1 ;;
     esac
 done
 
@@ -117,8 +130,30 @@ if ! [[ "$TST_SECS" =~ ^[0-9]+$ ]] || [ "$TST_SECS" -le 0 ]; then
     echo "⚠️  No {N}TST field in '$CONFIG_DIR'; assuming TST=${DEFAULT_TST_SECS}s for the timeout estimate"
     TST_SECS=$DEFAULT_TST_SECS
 fi
-PER_SAMPLE_SECS=$(( TST_SECS + PER_SAMPLE_OVERHEAD ))
-echo "TST: ${TST_SECS}s  ->  per-sample budget ${PER_SAMPLE_SECS}s"
+# Class count and per-sample budget depend on the victim: stress_battery[] for the stress-ng
+# modes, the sites file for the website modes. Getting this wrong only mis-sizes the hang
+# timeout, but a timeout sized for 38 classes would kill a healthy 100-site run outright.
+case "$TIMER_MODE" in
+    -wn|-wc)
+        if [[ ! -f "$SITES_FILE" ]]; then
+            echo "❌ $TIMER_MODE needs a sites file; '$SITES_FILE' not found" >&2
+            echo "   Set SITES_FILE=/path/to/sites.txt" >&2
+            exit 2
+        fi
+        NUM_CLASSES=$(grep -cE '^[[:space:]]*[^#[:space:]]' "$SITES_FILE" || true)
+        if ! [[ "$NUM_CLASSES" =~ ^[0-9]+$ ]] || [ "$NUM_CLASSES" -lt 2 ]; then
+            echo "❌ '$SITES_FILE' has ${NUM_CLASSES:-0} uncommented site(s); need at least 2" >&2
+            exit 2
+        fi
+        PER_SAMPLE_SECS=$(( TST_SECS + WEB_PER_SAMPLE_OVERHEAD ))
+        echo "Sites: $NUM_CLASSES from $SITES_FILE"
+        ;;
+    *)
+        NUM_CLASSES=$NUM_STRESSORS
+        PER_SAMPLE_SECS=$(( TST_SECS + PER_SAMPLE_OVERHEAD ))
+        ;;
+esac
+echo "TST: ${TST_SECS}s  ->  per-sample budget ${PER_SAMPLE_SECS}s over $NUM_CLASSES classes"
 
 # ============================================
 # Create directories
@@ -134,6 +169,8 @@ case "$TIMER_MODE" in
     -jssb) TIMER_SUBDIR="chrome_clock_jsmapSS_bidir" ;;
     -jnss) TIMER_SUBDIR="native_clock_jsmapSS" ;;
     -jnssb) TIMER_SUBDIR="native_clock_jsmapSS_bidir" ;;
+    -wn) TIMER_SUBDIR="native_clock_website" ;;
+    -wc) TIMER_SUBDIR="chrome_clock_website" ;;
     *)   TIMER_SUBDIR="native_clock" ;;
 esac
 # Shuffled Mastik e-set runs go to a distinct tree (must match the C tool's output path).
@@ -151,6 +188,7 @@ fi
 case "$TIMER_MODE" in
     -j|-jn|-jb|-jnb|-jss|-jssb|-jnss|-jnssb)
         if [ "$JSMAP_BUF_MB" != 12 ]; then TIMER_SUBDIR="${TIMER_SUBDIR}_${JSMAP_BUF_MB}MB"; fi ;;
+    -wn|-wc) : ;;   # Mastik clusters, no lazy map: the buffer knob does not apply
     *)
         if [ "$JSMAP_BUF_MB" != 12 ]; then
             echo "⚠️  JSMAP_BUF_MB=$JSMAP_BUF_MB ignored: $TIMER_MODE does not use the lazy map" >&2
@@ -222,7 +260,7 @@ for ((batch=1; batch<=NUM_BATCHES; batch++)); do
 
     # Derive a generous timeout from the actual work this invocation performs:
     #   ACTUAL_BATCH_SIZE rounds, each = NUM_STRESSORS samples + one inter-round cooldown.
-    EST_SECS=$(( ACTUAL_BATCH_SIZE * (NUM_STRESSORS * PER_SAMPLE_SECS + INTER_ROUND_SECS) ))
+    EST_SECS=$(( ACTUAL_BATCH_SIZE * (NUM_CLASSES * PER_SAMPLE_SECS + INTER_ROUND_SECS) ))
     TIMEOUT_SECS=$(( EST_SECS * TIMEOUT_SAFETY_PCT / 100 ))
 
     echo ""
@@ -230,7 +268,7 @@ for ((batch=1; batch<=NUM_BATCHES; batch++)); do
     echo "   Start Time: $(date '+%Y-%m-%d %H:%M:%S')"
     echo "   System Health: $(check_system_health)"
     echo "   Estimated runtime: ~${EST_SECS}s | Kill timeout: ${TIMEOUT_SECS}s"
-    echo "   Running: sudo env JSMAP_BUF_MB=$JSMAP_BUF_MB $PROGRAM $TIMER_MODE $SHUFFLE_FLAG $START_ITER $ACTUAL_BATCH_SIZE $CONFIG_DIR"
+    echo "   Running: sudo env JSMAP_BUF_MB=$JSMAP_BUF_MB SITES_FILE=$SITES_FILE${WEB_COOLDOWN_US:+ WEB_COOLDOWN_US=$WEB_COOLDOWN_US}${CHROME_UID:+ CHROME_UID=$CHROME_UID}${CHROME_GID:+ CHROME_GID=$CHROME_GID} $PROGRAM $TIMER_MODE $SHUFFLE_FLAG $START_ITER $ACTUAL_BATCH_SIZE $CONFIG_DIR"
     print_separator
 
     # Run the program with a workload-derived timeout (hang recovery only; never trims a healthy run).
@@ -240,7 +278,14 @@ for ((batch=1; batch<=NUM_BATCHES; batch++)); do
 
     while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
         # sudo resets the environment, so JSMAP_BUF_MB must be passed explicitly via `env`.
-        sudo env "JSMAP_BUF_MB=$JSMAP_BUF_MB" timeout "$TIMEOUT_SECS" $PROGRAM $TIMER_MODE $SHUFFLE_FLAG $START_ITER $ACTUAL_BATCH_SIZE $CONFIG_DIR >> "$BATCH_LOG" 2>&1
+        # CHROME_UID/CHROME_GID must be relayed explicitly: this script already runs as root,
+        # so the sudo below sets SUDO_UID=0 and the C tool could not otherwise tell who to drop
+        # Chrome to. Only forwarded when non-empty, so a direct `./batch_runner.sh` run (single
+        # sudo, SUDO_UID correct) keeps working unchanged.
+        sudo env "JSMAP_BUF_MB=$JSMAP_BUF_MB" "SITES_FILE=$SITES_FILE" \
+             ${WEB_COOLDOWN_US:+"WEB_COOLDOWN_US=$WEB_COOLDOWN_US"} \
+             ${CHROME_UID:+"CHROME_UID=$CHROME_UID"} ${CHROME_GID:+"CHROME_GID=$CHROME_GID"} \
+             timeout "$TIMEOUT_SECS" $PROGRAM $TIMER_MODE $SHUFFLE_FLAG $START_ITER $ACTUAL_BATCH_SIZE $CONFIG_DIR >> "$BATCH_LOG" 2>&1
         EXIT_CODE=$?
 
         if [ $EXIT_CODE -eq 124 ]; then

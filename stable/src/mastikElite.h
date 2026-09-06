@@ -51,7 +51,23 @@ int load_mapping_and_eSetsFrom_BIN_file(l3pp_t *l3, void ***e_sets, const char *
 
 Clusters_t* eviction_sets_to_Clusters(void ***e_sets, int num_sets, int NoC);
 
-void get_spatioTemporal_memoryGram(Clusters_t *Clusters, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename);
+// K = accesses between clock polls, from the config label's "{K}K" field, with the SAME
+// semantics as the jsmap samplers below:
+//   K > 0  -> fixed cadence. K == 1 is the original poll-every-access loop.
+//   K == 0 -> dynamic K (first batch ~4 cluster sweeps, then damped toward the deadline,
+//             floored at MIN_DYNAMIC_K), mirroring JS sweepClusterDynamicK.
+void get_spatioTemporal_memoryGram(Clusters_t *Clusters, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename, int K);
+
+// Chrome-mock-clock twin of the above (timer_mode 1, and timer_mode 11's website arm). Was
+// file-local; declared here now that website_prober.c -- a separate translation unit --
+// dispatches to it.
+void get_spatioTemporal_memoryGram_ChromeMock(Clusters_t *Clusters, int NoC, uint64_t TST_cycles, uint64_t SST_cycles, uint32_t *matrix, const char* filename, int K);
+
+// timer_mode -> on-disk clock subdirectory (data/<subdir>/<config>/<class>/<n>.csv), including
+// the "_<N>MB" tag for the jsmap modes. THE single source of truth for these names: the shell
+// front-ends (batch_runner.sh, finalize_experiment.sh) mirror it, and website_prober.c calls it
+// directly so the two website modes cannot drift from it.
+const char* timer_mode_subdir(int timer_mode);
 
 // bidir: 0 = forward-only (timer_mode 2/3); 1 = bidirectional Mastik double-sided sweep
 // (timer_mode 4/5), which requires build_lazy_backlinks(m) first. See mastikElite.c.

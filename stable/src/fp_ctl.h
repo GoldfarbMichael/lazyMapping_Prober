@@ -41,6 +41,18 @@ int fp_http_request(int port, const char *method, const char *path,
 int fp_http_get(int port, const char *path, char *resp, int resp_len);
 int fp_http_post(int port, const char *path, const char *body, char *resp, int resp_len);
 
+// ---- Split round trip ----
+// The two halves of fp_http_request, for a caller that wants to do work while the peer thinks.
+// On loopback the connect+write is microseconds and cannot meaningfully block; all the waiting
+// is in the read. website_prober.c uses this to start a victim page load and then sample the
+// cache for the whole trace before collecting the reply.
+//
+// fp_http_send returns a connected fd with the request already written, or -1.
+// fp_http_recv drains the reply and ALWAYS closes the fd, including on error.
+int fp_http_send(int port, const char *method, const char *path,
+                 const char *ctype, const char *body);
+int fp_http_recv(int fd, char *resp, int resp_len);
+
 // ---- Minimal JSON scalar extraction ----
 // The responses are tiny, flat objects (Flask jsonify / CDP target descriptors), so a
 // full parser would be dead weight. These find "key" and read the value that follows.

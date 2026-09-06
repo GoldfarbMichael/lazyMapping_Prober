@@ -22,11 +22,11 @@
 google	https://www.google.com
 bing	https://www.bing.com
 duckduckgo	https://duckduckgo.com
-yahoo	https://www.yahoo.com
-yandex	https://yandex.com
-baidu	https://www.baidu.com
-ecosia	https://www.ecosia.org
-brave_search	https://search.brave.com
+#yahoo	https://www.yahoo.com
+#yandex	https://yandex.com
+#baidu	https://www.baidu.com
+#ecosia	https://www.ecosia.org
+#brave_search	https://search.brave.com
 
 # ---- reference / wiki ----
 wikipedia	https://en.wikipedia.org/wiki/Main_Page
@@ -64,80 +64,80 @@ pinterest	https://www.pinterest.com
 tumblr	https://www.tumblr.com
 quora	https://www.quora.com
 medium	https://medium.com
-substack	https://substack.com
-hackernews	https://news.ycombinator.com
-slashdot	https://slashdot.org
-mastodon	https://mastodon.social
-vk	https://vk.com
+#substack	https://substack.com
+#hackernews	https://news.ycombinator.com
+#slashdot	https://slashdot.org
+#mastodon	https://mastodon.social
+#vk	https://vk.com
 
 # ---- video / audio (heavy) ----
-youtube	https://www.youtube.com
-vimeo	https://vimeo.com
-twitch	https://www.twitch.tv
-dailymotion	https://www.dailymotion.com
-soundcloud	https://soundcloud.com
-spotify	https://open.spotify.com
+#youtube	https://www.youtube.com
+#vimeo	https://vimeo.com
+#twitch	https://www.twitch.tv
+#dailymotion	https://www.dailymotion.com
+#soundcloud	https://soundcloud.com
+#spotify	https://open.spotify.com
 
 
 
-netflix	https://www.netflix.com
-bandcamp	https://bandcamp.com
+#netflix	https://www.netflix.com
+#bandcamp	https://bandcamp.com
 
 # ---- e-commerce ----
-amazon	https://www.amazon.com
-ebay	https://www.ebay.com
-aliexpress	https://www.aliexpress.com
-etsy	https://www.etsy.com
-walmart	https://www.walmart.com
-target	https://www.target.com
-ikea	https://www.ikea.com
-bestbuy	https://www.bestbuy.com
-booking	https://www.booking.com
-airbnb	https://www.airbnb.com
-tripadvisor	https://www.tripadvisor.com
-alibaba	https://www.alibaba.com
+#amazon	https://www.amazon.com
+#ebay	https://www.ebay.com
+#aliexpress	https://www.aliexpress.com
+#etsy	https://www.etsy.com
+#walmart	https://www.walmart.com
+#target	https://www.target.com
+#ikea	https://www.ikea.com
+#bestbuy	https://www.bestbuy.com
+#booking	https://www.booking.com
+#airbnb	https://www.airbnb.com
+#tripadvisor	https://www.tripadvisor.com
+#alibaba	https://www.alibaba.com
 
 # ---- developer / technical ----
-github	https://github.com
-gitlab	https://gitlab.com
-stackoverflow	https://stackoverflow.com
-mdn	https://developer.mozilla.org
-npmjs	https://www.npmjs.com
-pypi	https://pypi.org
-docker_hub	https://hub.docker.com
-kaggle	https://www.kaggle.com
-huggingface	https://huggingface.co
-arxiv	https://arxiv.org
-sourceforge	https://sourceforge.net
-w3schools	https://www.w3schools.com
-rust_lang	https://www.rust-lang.org
-golang	https://go.dev
-python_org	https://www.python.org
-kernel_org	https://www.kernel.org
+#github	https://github.com
+#gitlab	https://gitlab.com
+#stackoverflow	https://stackoverflow.com
+#mdn	https://developer.mozilla.org
+#npmjs	https://www.npmjs.com
+#pypi	https://pypi.org
+#docker_hub	https://hub.docker.com
+#kaggle	https://www.kaggle.com
+#huggingface	https://huggingface.co
+#arxiv	https://arxiv.org
+#sourceforge	https://sourceforge.net
+#w3schools	https://www.w3schools.com
+#rust_lang	https://www.rust-lang.org
+#golang	https://go.dev
+#python_org	https://www.python.org
+#kernel_org	https://www.kernel.org
 
 # ---- cloud / corporate ----
-microsoft	https://www.microsoft.com
-apple	https://www.apple.com
-adobe	https://www.adobe.com
-ibm	https://www.ibm.com
-oracle	https://www.oracle.com
-salesforce	https://www.salesforce.com
-cloudflare	https://www.cloudflare.com
-nvidia	https://www.nvidia.com
-intel	https://www.intel.com
-samsung	https://www.samsung.com
-mozilla	https://www.mozilla.org
-wordpress	https://wordpress.com
+#microsoft	https://www.microsoft.com
+#apple	https://www.apple.com
+#adobe	https://www.adobe.com
+#ibm	https://www.ibm.com
+#oracle	https://www.oracle.com
+#salesforce	https://www.salesforce.com
+#cloudflare	https://www.cloudflare.com
+#nvidia	https://www.nvidia.com
+#intel	https://www.intel.com
+#samsung	https://www.samsung.com
+#mozilla	https://www.mozilla.org
+#wordpress	https://wordpress.com
 
 # ---- education / gov / org ----
-mit	https://www.mit.edu
-stanford	https://www.stanford.edu
-harvard	https://www.harvard.edu
-bgu	https://www.bgu.ac.il
-coursera	https://www.coursera.org
-edx	https://www.edx.org
-khanacademy	https://www.khanacademy.org
-nasa	https://www.nasa.gov
+#mit	https://www.mit.edu
+#stanford	https://www.stanford.edu
+#harvard	https://www.harvard.edu
+#bgu	https://www.bgu.ac.il
+#coursera	https://www.coursera.org
+#edx	https://www.edx.org
+#khanacademy	https://www.khanacademy.org
+#nasa	https://www.nasa.gov
 #who	https://www.who.int
 #nih	https://www.nih.gov
 

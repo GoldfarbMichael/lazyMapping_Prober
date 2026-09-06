@@ -17,6 +17,7 @@
 #include "utils.h"
 #include "tests.h"
 #include "mastikElite.h"
+#include "website_prober.h"
 
 #define HUGEPAGE_PATH_A "/dev/hugepages/map_A"
 #define HUGEPAGE_PATH_B "/dev/hugepages/map_B"
@@ -227,6 +228,12 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "-jnssb") == 0) {
             timer_mode = 9;  // Native rdtscp64 clock, JS-style lazy-map victim, SINGLE-SWEEP (idle-fill), BIDIRECTIONAL
             printf("[INFO] Timer Mode: Native rdtscp64 + JS-style lazy map SINGLE-SWEEP BIDIRECTIONAL (-jnssb)\n");
+        } else if (strcmp(argv[i], "-wn") == 0) {
+            timer_mode = 10; // Native rdtscp64 clock, Mastik clusters, REAL-WEBSITE victim
+            printf("[INFO] Timer Mode: Native rdtscp64 + Mastik clusters + WEBSITE victim (-wn)\n");
+        } else if (strcmp(argv[i], "-wc") == 0) {
+            timer_mode = 11; // Chrome mock clock, Mastik clusters, REAL-WEBSITE victim
+            printf("[INFO] Timer Mode: Chrome Mock + Mastik clusters + WEBSITE victim (-wc)\n");
         } else if (strcmp(argv[i], "-s") == 0) {
             shuffleClusters = 1;  // line-shuffle clusters once (only active with -c / timer_mode 1)
             printf("[INFO] Cluster shuffle: ON (-s; effective only with -c)\n");
@@ -274,8 +281,15 @@ int main(int argc, char **argv) {
         fprintf(stderr, "  -jssb           : -jss + BIDIRECTIONAL single sweep (-> data/chrome_clock_jsmapSS_bidir/)\n");
         fprintf(stderr, "  -jnss           : Native rdtscp64 timer + JS lazy map SINGLE-SWEEP (idle-fill) (-> data/native_clock_jsmapSS/)\n");
         fprintf(stderr, "  -jnssb          : -jnss + BIDIRECTIONAL single sweep (-> data/native_clock_jsmapSS_bidir/)\n");
+        fprintf(stderr, "  -wn             : Native rdtscp64 timer, Mastik clusters, REAL-WEBSITE victim\n");
+        fprintf(stderr, "                    (-> data/native_clock_website/; needs a sites file)\n");
+        fprintf(stderr, "  -wc             : Chrome mock timer, Mastik clusters, REAL-WEBSITE victim\n");
+        fprintf(stderr, "                    (-> data/chrome_clock_website/; needs a sites file)\n");
         fprintf(stderr, "  -s              : Line-shuffle the Mastik clusters once (coverage->accuracy A/B; only with -c\n");
         fprintf(stderr, "                    -> data/chrome_clock_shuffled/)\n\n");
+        fprintf(stderr, "Environment:\n");
+        fprintf(stderr, "  SITES_FILE      : '<slug>\\t<url>' list for -wn/-wc (default: sites.txt)\n");
+        fprintf(stderr, "  WEB_COOLDOWN_US : cooldown between website samples (default 1000000)\n\n");
         fprintf(stderr, "Arguments:\n");
         fprintf(stderr, "  start_iteration : Starting index for this batch (0-based)\n");
         fprintf(stderr, "  batch_size      : Number of iterations to run in this batch\n");
@@ -292,6 +306,18 @@ int main(int argc, char **argv) {
     // Initialize browser environment globals (MUST be called FIRST before any timer usage)
     setup_browser_environment();
     sleep(0.5);
+
+    // Modes 10/11 swap the victim from a forked stress-ng to a real website in a Chrome tab
+    // driven over CDP. Different victim contract entirely, so a different driver -- and it
+    // installs its own signal handler, since cleanup_handler() above only pkills stress-ng and
+    // would orphan the whole browser tree on Ctrl-C.
+    if (timer_mode >= 10) {
+        const char *sites_file = getenv("SITES_FILE");
+        if (!sites_file || !*sites_file) sites_file = "sites.txt";
+        return runWebsite_batches(tst_sec, batch_size, start_iteration, output_dir,
+                                  HUGEPAGE_PATH_A, MAPPING_FILE_A, timer_mode, sites_file);
+    }
+
     runStressNG_batches(tst_sec, batch_size, start_iteration, output_dir, HUGEPAGE_PATH_A, MAPPING_FILE_A, timer_mode, shuffleClusters);
 
 
