@@ -34,6 +34,7 @@
 # 100 sites across all 7 NoCs is not practical in one pass. Suggested shape: comment sites.txt
 # down to ~20-38 sites for the full NoC sweep (that curve is the actual thesis result), then do
 # one 100-site run at the best NoC for a literature-comparable WF number.
+# BATCH_SIZE (below) adds ~10 s per batch on top of those figures.
 #
 # Run this AS YOUR NORMAL USER. It starts the server as you (so the CSVs are owned by you) and
 # finalizes with your ssh keys.
@@ -46,8 +47,8 @@ SCRIPT_DIR="$(pwd)"
 # Configuration — the experiment parameters
 # ============================================
 # Spatial sweep: one orchestrator run per NoC. Powers of two in [1,64] (the Lazy Mapping regime).
-NOCS=(1 2 4 8 16 32 64)
-# NOCS=(1)
+# NOCS=(1 2 4 8 16 32 64)
+NOCS=(1)
 
 # NOCS=(16)
 
@@ -61,7 +62,36 @@ K=180
 # rows T = floor(TST_ms / (Q * NoC)).
 CYCLES_PER_ADDRESS=2288
 # Samples collected per SITE, per NoC.
-SAMPLES_PER_CLASS=100
+SAMPLES_PER_CLASS=1
+
+# ---- BATCHING: how many samples/site one orchestrator invocation collects ----
+#
+# This is the LAZY-MAPPING knob, not just a crash-recovery one. main.js builds the mapping
+# ONCE per page load (`new LazyMapping(...)` in runFingerprint), so one invocation = one
+# Chrome = ONE random mapping for every trace it collects. Left unbatched, all
+# sites x SAMPLES_PER_CLASS traces of a NoC share a single mapping, and the classifier cannot
+# be shown to have learnt the SITE rather than that mapping's particular page shuffle.
+#
+#   BATCH_SIZE=1   -> a fresh Chrome, and therefore a fresh mapping, every ROUND (one round =
+#                     one sample of every site). The mapping varies across samples of a site
+#                     but is constant across sites within a round -- a blocked design, so the
+#                     mapping cannot become class-discriminative.
+#   BATCH_SIZE=0   -> batching off: one invocation per NoC (the pre-batching behaviour).
+#
+# Cluster INDEX semantics are unaffected: a cluster is defined by address bits 6-11, so column
+# c means the same thing under every mapping; only each eviction set's page composition is
+# re-drawn. Feature columns stay aligned across samples.
+#
+# COST: ~10 s per batch (Chrome launch + CDP/ready polls + mapping build + teardown). At
+# BATCH_SIZE=1 with 20 sites and TST=2 that is ~10 s on a ~90 s round, i.e. ~+11% wall time.
+BATCH_SIZE=1
+# Settle time between batches, SECONDS. Applied AFTER waiting for the previous Chrome's
+# DevTools endpoint to disappear (sweep_lib.sh wait_cdp_clear), not instead of it.
+BATCH_COOLDOWN_S=3
+# 1 = also push one remote status line per batch. Off by default: at BATCH_SIZE=1 that is
+# 100 batches x 7 NoCs = 700 synchronous ssh round-trips.
+STATUS_PER_BATCH="${STATUS_PER_BATCH:-0}"
+
 # Cooldown between samples, MICROSECONDS (500000 = 0.5 s).
 SAMPLE_COOLDOWN_US=500000
 # Settle time between NoC runs (after tearing down that run's Chrome profile).

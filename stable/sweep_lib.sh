@@ -19,6 +19,54 @@
 #     SAMPLES_PER_CLASS   samples per class, per NoC
 #     SAMPLE_COOLDOWN_US  cooldown between samples, MICROseconds
 #     NOC_COOLDOWN_S      settle time between NoC runs, SECONDS
+#     BATCH_SIZE          OPTIONAL. Samples/class per orchestrator INVOCATION. 0 or unset (the
+#                         default) = one invocation per NoC, i.e. exactly the pre-batching
+#                         behaviour. Any other value splits a NoC into
+#                         ceil(SAMPLES_PER_CLASS / BATCH_SIZE) invocations.
+#     BATCH_COOLDOWN_S    OPTIONAL. Settle time between batches, SECONDS (default 3).
+#     STATUS_PER_BATCH    OPTIONAL. 1 = also push a remote status line per batch (default 0;
+#                         a 100-batch x 7-NoC sweep would otherwise make 700 ssh round-trips).
+#
+#   WHY BATCHING EXISTS (it is not just crash recovery)
+#     The browser sampler builds its lazy mapping ONCE per page load (main.js runFingerprint:
+#     `new LazyMapping(...)`, whose build() Fisher-Yates-shuffles the pages with Math.random).
+#     One orchestrator invocation is therefore one Chrome, one page load, and ONE mapping for
+#     every trace it collects -- so with BATCH_SIZE unset, all SAMPLES_PER_CLASS x classes
+#     traces of a NoC share a single random mapping, and any mapping-specific quirk is baked
+#     into the whole training set. Batching relaunches Chrome per batch, which re-randomises
+#     the mapping. BATCH_SIZE=1 gives a fresh mapping per ROUND (one round = one sample of
+#     every class), which is a blocked design: the mapping varies across samples of a class but
+#     is held constant across classes within a round, so it cannot become class-discriminative.
+#     Cluster INDEX semantics are unaffected -- a cluster is defined by address bits 6-11, so
+#     column c means the same thing under every mapping; only each eviction set's page
+#     composition is re-drawn. Feature columns stay aligned across samples.
+#     No C, JS or server change is needed for this: the orchestrator already takes
+#     samples/class as argv[2], and server.py's /collect picks the next CSV index by scanning
+#     the class directory, so re-invoking APPENDS instead of overwriting.
+#     BATCH_SIZE          OPTIONAL. Samples/class per orchestrator INVOCATION. 0 or unset (the
+#                         default) = one invocation per NoC, i.e. exactly the pre-batching
+#                         behaviour. Any other value splits a NoC into
+#                         ceil(SAMPLES_PER_CLASS / BATCH_SIZE) invocations.
+#     BATCH_COOLDOWN_S    OPTIONAL. Settle time between batches, SECONDS (default 3).
+#     STATUS_PER_BATCH    OPTIONAL. 1 = also push a remote status line per batch (default 0: a
+#                         100-batch x 7-NoC sweep would otherwise make 700 ssh round-trips).
+#
+#   WHY BATCHING EXISTS (it is a MAPPING knob, not just crash recovery)
+#     The browser sampler builds its lazy mapping ONCE per page load (main.js runFingerprint:
+#     `new LazyMapping(...)`, whose build() Fisher-Yates-shuffles the pages with Math.random).
+#     One orchestrator invocation is therefore one Chrome, one page load, and ONE mapping for
+#     every trace it collects -- so with BATCH_SIZE unset, all (classes x SAMPLES_PER_CLASS)
+#     traces of a NoC share a single random mapping, and any mapping-specific quirk is baked
+#     into the whole training set. Batching relaunches Chrome per batch, which re-randomises
+#     the mapping. BATCH_SIZE=1 gives a fresh mapping per ROUND (one round = one sample of
+#     every class): a blocked design, where the mapping varies across samples of a class but is
+#     held constant across classes within a round, so it cannot become class-discriminative.
+#     Cluster INDEX semantics are unaffected -- a cluster is defined by address bits 6-11, so
+#     column c means the same thing under every mapping; only each eviction set's page
+#     composition is re-drawn. Feature columns therefore stay aligned across samples.
+#     No C, JS or server change is needed for this: the orchestrator already takes samples/class
+#     as argv[2], and server.py's /collect picks the next CSV index by scanning the class
+#     directory (next_index), so re-invoking APPENDS rather than overwrites.
 #
 #   Identity
 #     SCRIPT_DIR          stable/
@@ -147,6 +195,23 @@ STATUS_REMOTE_DIR="${STATUS_REMOTE_DIR:-/home/michael/experimentStatusLogs}"
 STATUS_RETRIES="${STATUS_RETRIES:-3}"
 STATUS_LOG_NAME=""     # resolved once per sweep, in run_sweep
 
+# ---------------------------------------------------------------------------
+# Batching defaults.
+#
+# Defaulted HERE, at library scope, because the front-ends run under `set -u`: a front-end that
+# never heard of batching (run_fingerprint_sweep.sh) must not abort on an unbound BATCH_SIZE.
+# 0 = no batching, which is the pre-batching behaviour exactly.
+# ---------------------------------------------------------------------------
+BATCH_SIZE="${BATCH_SIZE:-0}"
+BATCH_COOLDOWN_S="${BATCH_COOLDOWN_S:-3}"
+STATUS_PER_BATCH="${STATUS_PER_BATCH:-0}"
+# Rough per-batch fixed cost (Chrome launch + the 1 s-granularity CDP/ready polls + mapping
+# build + teardown). Used ONLY to keep the wall-time estimate honest once batching is on.
+BATCH_OVERHEAD_S="${BATCH_OVERHEAD_S:-10}"
+# How long to wait for the previous batch's DevTools endpoint to disappear before launching the
+# next Chrome. See wait_cdp_clear.
+CDP_CLEAR_TIMEOUT_S="${CDP_CLEAR_TIMEOUT_S:-20}"
+
 # Append one line to the remote status log. Never fatal.
 status_push() {
     local line="$1"
@@ -178,6 +243,29 @@ status_push() {
 # Reap this stage's Chrome. Used both between NoC runs and on cleanup.
 kill_stage_chrome() {
     $ORCH_SUDO pkill -9 -f "user-data-dir=$(bracketed "$CHROME_PROFILE")" >/dev/null 2>&1 || true
+}
+
+# Block until Chrome's DevTools endpoint is GONE (bounded by CDP_CLEAR_TIMEOUT_S).
+#
+# Batching introduces a failure mode a single-invocation run never had: the next orchestrator
+# launches a browser and then polls :9222 for the DevTools endpoint (web_wait_cdp). If the
+# PREVIOUS batch's Chrome is still shutting down, that poll can answer from the DYING instance
+# -- the orchestrator would then drive a browser that is about to vanish, and the batch is lost
+# (or worse, half-collected). SIGTERM + teardown is not instant, so wait for the port to go
+# quiet instead of guessing with a sleep. Non-fatal on timeout: warn and let the orchestrator's
+# own health checks deal with it, rather than killing a multi-day sweep here.
+wait_cdp_clear() {
+    local waited=0
+    while curl -s -o /dev/null --max-time 1 "http://127.0.0.1:9222/json/version"; do
+        if [ "$waited" -ge "$CDP_CLEAR_TIMEOUT_S" ]; then
+            echo "[sweep] WARNING: DevTools still answering on :9222 after ${waited}s -- a" \
+                 "previous Chrome did not die. The next batch may attach to it." >&2
+            return 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    return 0
 }
 
 CLEANED=0
@@ -224,7 +312,7 @@ run_sweep() {
             echo "[sweep] ERROR: $v must be a positive integer, got '${!v}'" >&2; exit 2
         fi
     done
-    for v in K SAMPLE_COOLDOWN_US NOC_COOLDOWN_S; do
+    for v in K SAMPLE_COOLDOWN_US NOC_COOLDOWN_S BATCH_SIZE BATCH_COOLDOWN_S; do
         if ! [[ "${!v}" =~ ^[0-9]+$ ]]; then
             echo "[sweep] ERROR: $v must be a non-negative integer, got '${!v}'" >&2; exit 2
         fi
@@ -244,12 +332,26 @@ run_sweep() {
     local TOTAL_CONFIGS=${#CONFIGS[@]}
     mkdir -p "$LOG_DIR"
 
+    # ---- resolve batching (see "WHY BATCHING EXISTS" in the header) ----
+    # BATCH_SIZE of 0 (the default), or one >= SAMPLES_PER_CLASS, collapses to a SINGLE
+    # invocation per NoC -- byte-identical to the pre-batching path, which is what Stage 3 gets.
+    local BATCH_N=$SAMPLES_PER_CLASS NUM_BATCHES=1
+    if [ "$BATCH_SIZE" -gt 0 ] && [ "$BATCH_SIZE" -lt "$SAMPLES_PER_CLASS" ]; then
+        BATCH_N=$BATCH_SIZE
+        NUM_BATCHES=$(( (SAMPLES_PER_CLASS + BATCH_N - 1) / BATCH_N ))
+    fi
+
     # Per-sample wall time: the trace, the ack margin, the cooldown, and ~1 s of victim setup.
     local per_sample_s
     per_sample_s=$(awk -v t="$TST" -v c="$SAMPLE_COOLDOWN_US" 'BEGIN{printf "%.2f", t + 0.5 + c/1e6 + 1.0}')
+    # Batching adds a fixed per-invocation cost (relaunch + mapping build) and a cooldown; at
+    # BATCH_SIZE=1 that is paid once per round, so the estimate must include it or a batched
+    # sweep will look like it is running late when it is exactly on schedule.
     local est_h
-    est_h=$(awk -v n="$CLASS_COUNT" -v s="$SAMPLES_PER_CLASS" -v k="$TOTAL_CONFIGS" -v p="$per_sample_s" \
-                'BEGIN{printf "%.1f", n*s*k*p/3600}')
+    est_h=$(awk -v n="$CLASS_COUNT" -v s="$SAMPLES_PER_CLASS" -v k="$TOTAL_CONFIGS" \
+                -v p="$per_sample_s" -v b="$NUM_BATCHES" -v o="$BATCH_OVERHEAD_S" \
+                -v bc="$BATCH_COOLDOWN_S" \
+                'BEGIN{printf "%.1f", (n*s*k*p + k*b*(o + bc))/3600}')
 
     echo ""
     echo "╔════════════════════════════════════════════════════════════════╗"
@@ -264,11 +366,22 @@ run_sweep() {
     echo "  Cycles/address:    $CYCLES_PER_ADDRESS"
     echo "  Classes:           $CLASS_COUNT ${CLASS_NOUN}s"
     echo "  Samples/class:     $SAMPLES_PER_CLASS"
+    if [ "$NUM_BATCHES" -gt 1 ]; then
+        echo "  Batching:          $NUM_BATCHES batches/NoC x $BATCH_N sample(s)/${CLASS_NOUN} \
+-> a FRESH lazy mapping every batch (${BATCH_COOLDOWN_S}s between batches)"
+    else
+        echo "  Batching:          off (1 invocation/NoC -> ONE lazy mapping for every trace)"
+    fi
     echo "  Sample cooldown:   ${SAMPLE_COOLDOWN_US} us ($((SAMPLE_COOLDOWN_US / 1000)) ms)"
     echo "  Config labels:     ${CONFIGS[*]}"
     echo "  Data tree:         $DATA_TREE/${STAGE_TAG}_<NoC>C_${TST}TST_${K}K_${CYCLES_PER_ADDRESS}cycles"
     echo "  Log Directory:     $LOG_DIR"
-    echo "  Est. wall time:    ~${est_h} h  (${per_sample_s}s/sample x $CLASS_COUNT x $SAMPLES_PER_CLASS x $TOTAL_CONFIGS)"
+    if [ "$NUM_BATCHES" -gt 1 ]; then
+        echo "  Est. wall time:    ~${est_h} h  (${per_sample_s}s/sample x $CLASS_COUNT x $SAMPLES_PER_CLASS x $TOTAL_CONFIGS" \
+             "+ $((TOTAL_CONFIGS * NUM_BATCHES)) batches x $((BATCH_OVERHEAD_S + BATCH_COOLDOWN_S))s relaunch)"
+    else
+        echo "  Est. wall time:    ~${est_h} h  (${per_sample_s}s/sample x $CLASS_COUNT x $SAMPLES_PER_CLASS x $TOTAL_CONFIGS)"
+    fi
     if [ "$DO_FINALIZE" != "0" ]; then
         echo "  Finalize:          -> $LOCAL_H5_DIR + $REMOTE_USER@$REMOTE_HOST:$REMOTE_DIR (dry_run=$DRY_RUN)"
     else
@@ -328,51 +441,104 @@ run_sweep() {
     fi
     status_push "=== SWEEP START $(date '+%Y-%m-%d %H:%M:%S')  host=$(hostname)  stage=$STAGE_TAG  \
 classes=$CLASS_COUNT ${CLASS_NOUN}s  samples/class=$SAMPLES_PER_CLASS  NoCs=[${NOCS[*]}]  \
+batches/NoC=$NUM_BATCHES x $BATCH_N  \
 TST=${TST}s K=$K cycles=$CYCLES_PER_ADDRESS  est=${est_h}h"
+    local ABORT=0
     for ((i = 0; i < TOTAL_CONFIGS; i++)); do
         CONFIG="${CONFIGS[$i]}"
-        RUN_LOG="$LOG_DIR/${LOG_PREFIX}_${CONFIG}_$(date +%Y%m%d_%H%M%S).log"
         echo "============================================================"
         echo "[sweep] [$((i + 1))/$TOTAL_CONFIGS] $CONFIG   ($(date '+%Y-%m-%d %H:%M:%S'))"
-        echo "[sweep] log: $RUN_LOG"
+        [ "$NUM_BATCHES" -gt 1 ] && \
+            echo "[sweep] $NUM_BATCHES batches x $BATCH_N sample(s)/${CLASS_NOUN}, fresh mapping each"
         echo "============================================================"
-        # Re-gate on every NoC: a coordinator that died during the previous run (OOM, stray
-        # pkill, crash) would otherwise cost a full ready-timeout per remaining NoC and collect
-        # nothing.
-        if ! ensure_server; then
-            echo "[sweep] ABORT: coordinator unreachable and could not be restarted" >&2
-            FAIL_COUNT=$((FAIL_COUNT + TOTAL_CONFIGS - i))   # this NoC and every one not run
-            break
-        fi
-        # The non-label knobs are passed as ARGUMENTS, not `sudo env VAR=...`: a sudoers rule
-        # grants NOPASSWD on the binary (any args), whereas `sudo env` would need /usr/bin/env in
-        # sudoers -- effectively NOPASSWD: ALL, since `sudo env` can exec anything as root.
-        # `set -o pipefail` (front-end) makes this `if` see the ORCHESTRATOR's status, not tee's.
-        local noc_t0 noc_t1 noc_status noc_csvs
+
+        local noc_t0 noc_t1 noc_status noc_csvs b batch_n done_samples batch_fail batch_t0
         noc_t0=$(date +%s)
         noc_status="OK"
-        if ! $ORCH_SUDO "$ORCH_BIN" "$CONFIG" "$SAMPLES_PER_CLASS" "$SAMPLE_COOLDOWN_US" \
-                ${ORCH_EXTRA_ARGS[@]+"${ORCH_EXTRA_ARGS[@]}"} 2>&1 | tee "$RUN_LOG"; then
-            echo "[sweep] WARNING: orchestrator failed for $CONFIG -- continuing" >&2
+        batch_fail=0
+        done_samples=0
+
+        # Each batch is one orchestrator invocation = one Chrome = one lazy mapping. With
+        # NUM_BATCHES=1 this loop body runs exactly once and does exactly what the
+        # pre-batching code did.
+        for ((b = 1; b <= NUM_BATCHES; b++)); do
+            batch_n=$(( SAMPLES_PER_CLASS - done_samples ))
+            [ "$batch_n" -gt "$BATCH_N" ] && batch_n=$BATCH_N
+
+            # Re-gate on every BATCH (it was every NoC): a coordinator that died mid-NoC would
+            # otherwise cost a full ready-timeout per remaining batch and collect nothing.
+            if ! ensure_server; then
+                echo "[sweep] ABORT: coordinator unreachable and could not be restarted" >&2
+                ABORT=1
+                break
+            fi
+
+            if [ "$NUM_BATCHES" -gt 1 ]; then
+                RUN_LOG="$LOG_DIR/${LOG_PREFIX}_${CONFIG}_b$(printf '%03d' "$b")_$(date +%Y%m%d_%H%M%S).log"
+                echo "[sweep] --- batch $b/$NUM_BATCHES  ($batch_n sample(s)/${CLASS_NOUN}, \
+$((done_samples + batch_n))/$SAMPLES_PER_CLASS after this)  $(date '+%H:%M:%S')"
+            else
+                RUN_LOG="$LOG_DIR/${LOG_PREFIX}_${CONFIG}_$(date +%Y%m%d_%H%M%S).log"
+            fi
+            echo "[sweep] log: $RUN_LOG"
+
+            # The non-label knobs are passed as ARGUMENTS, not `sudo env VAR=...`: a sudoers rule
+            # grants NOPASSWD on the binary (any args), whereas `sudo env` would need /usr/bin/env
+            # in sudoers -- effectively NOPASSWD: ALL, since `sudo env` can exec anything as root.
+            # `set -o pipefail` (front-end) makes this `if` see the ORCHESTRATOR's status, not
+            # tee's.
+            batch_t0=$(date +%s)
+            if ! $ORCH_SUDO "$ORCH_BIN" "$CONFIG" "$batch_n" "$SAMPLE_COOLDOWN_US" \
+                    ${ORCH_EXTRA_ARGS[@]+"${ORCH_EXTRA_ARGS[@]}"} 2>&1 | tee "$RUN_LOG"; then
+                echo "[sweep] WARNING: orchestrator failed for $CONFIG" \
+                     "$([ "$NUM_BATCHES" -gt 1 ] && echo "(batch $b/$NUM_BATCHES) ")-- continuing" >&2
+                batch_fail=$((batch_fail + 1))
+                noc_status="FAILED"
+            fi
+            done_samples=$((done_samples + batch_n))
+
+            # Tear down this batch's Chrome so the next batch (or NoC) starts from a clean
+            # profile AND a freshly built mapping.
+            kill_stage_chrome
+
+            if [ "$b" -lt "$NUM_BATCHES" ]; then
+                # Do not launch the next browser until this one's DevTools endpoint is gone.
+                wait_cdp_clear
+                if [ "$STATUS_PER_BATCH" = "1" ]; then
+                    status_push "$(printf '[%d/%d] NoC=%-3s batch %d/%d  %d sample(s)  duration %s  status=%s' \
+                        "$((i + 1))" "$TOTAL_CONFIGS" "${NOCS[$i]}" "$b" "$NUM_BATCHES" \
+                        "$batch_n" "$(format_duration $(($(date +%s) - batch_t0)))" \
+                        "$([ "$batch_fail" -gt 0 ] && echo FAILED || echo OK)")"
+                fi
+                sleep "$BATCH_COOLDOWN_S"
+            fi
+        done
+        noc_t1=$(date +%s)
+
+        # An aborted NoC also condemns every NoC after it, so count them all here; otherwise a
+        # NoC is failed iff ANY of its batches failed (partial data must never reach finalize).
+        if [ "$ABORT" = 1 ]; then
+            FAIL_COUNT=$((FAIL_COUNT + TOTAL_CONFIGS - i))   # this NoC and every one not run
+            noc_status="ABORT"
+        elif [ "$batch_fail" -gt 0 ]; then
             FAIL_COUNT=$((FAIL_COUNT + 1))
             noc_status="FAILED"
         fi
-        noc_t1=$(date +%s)
-        # Tear down the run's Chrome so the next NoC starts from a clean profile.
-        kill_stage_chrome
 
         # What actually landed on disk -- the honest progress number, independent of exit code.
         noc_csvs=$(find "$DATA_TREE/${STAGE_TAG}_${CONFIG}" -name '*.csv' 2>/dev/null | wc -l)
 
         # Push BEFORE the cooldown and before the next NoC, so the remote log can never report
         # a NoC as finished out of order.
-        status_push "$(printf '[%d/%d] NoC=%-3s started %s  finished %s  duration %s  status=%-6s csvs=%d/%d' \
+        status_push "$(printf '[%d/%d] NoC=%-3s started %s  finished %s  duration %s  status=%-6s batches=%d/%d  csvs=%d/%d' \
             "$((i + 1))" "$TOTAL_CONFIGS" "${NOCS[$i]}" \
             "$(date -d "@$noc_t0" '+%Y-%m-%d %H:%M:%S')" \
             "$(date -d "@$noc_t1" '+%Y-%m-%d %H:%M:%S')" \
             "$(format_duration $((noc_t1 - noc_t0)))" \
-            "$noc_status" "$noc_csvs" "$((CLASS_COUNT * SAMPLES_PER_CLASS))")"
+            "$noc_status" "$((b - 1 - batch_fail))" "$NUM_BATCHES" \
+            "$noc_csvs" "$((CLASS_COUNT * SAMPLES_PER_CLASS))")"
 
+        [ "$ABORT" = 1 ] && break
         sleep "$NOC_COOLDOWN_S"
     done
     local TOTAL_DURATION=$(( $(date +%s) - START_TIME ))
