@@ -50,3 +50,6 @@ __pycache__/
 *Shlomi'sCode
 
 *.h5
+# Windows build output + the Python venv the Windows sweep uses (run_website_sweep.sh header)
+*.exe
+.venv/

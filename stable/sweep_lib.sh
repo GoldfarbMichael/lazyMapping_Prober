@@ -100,6 +100,38 @@
 # writes a mislabelled tree; and the finalize (which DELETES the CSVs) runs only when every
 # NoC succeeded.
 
+# ---------------------------------------------------------------------------
+# Platform. Ubuntu runs this natively; Windows 11 runs it under Git Bash (MINGW64). Every
+# Windows difference is confined to a branch on IS_WIN inside a helper below -- the Linux
+# branches are the original code, unchanged, so Stage 3 behaves exactly as before.
+#
+# Windows substitutions, in one place:
+#   ss -lptn          -> netstat -ano          (who listens on :8080, as a Windows PID)
+#   kill <listener>   -> taskkill //F //T      (the server is a native python.exe)
+#   pkill -f chrome   -> PowerShell CommandLine match on chrome.exe (pkill cannot see it)
+#   conda + taskset   -> $SERVER_PYTHON (a venv) + optional PowerShell ProcessorAffinity
+#   make + gcc        -> mingw32-make + gcc from MSYS2 UCRT64 ($MSYS2_UCRT64_BIN)
+# ---------------------------------------------------------------------------
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) IS_WIN=1 ;;
+    *)                    IS_WIN=0 ;;
+esac
+
+if [ "$IS_WIN" = "1" ]; then
+    # The UCRT64 toolchain is put on PATH for the BUILD ONLY (see build_path), and FIRST there:
+    # appended, gcc's cc1.exe loads same-named but incompatible DLLs from Git's /mingw64/bin and
+    # dies without a message. Kept off the sweep's own PATH so UCRT64's curl/python never shadow
+    # Git Bash's. Only its native mingw32-make is used -- never MSYS2's /usr/bin/make, whose
+    # msys-2.0.dll would clash with Git Bash's own.
+    MSYS2_UCRT64_BIN="${MSYS2_UCRT64_BIN:-/c/msys64/ucrt64/bin}"
+    MAKE="${MAKE:-mingw32-make}"
+    # The server and csv_to_h5.py run on a cp1255 (non-UTF-8) system code page; UTF-8 mode
+    # keeps their file I/O independent of the machine's locale.
+    export PYTHONUTF8=1
+else
+    MAKE="${MAKE:-make}"
+fi
+
 SERVER_PID=""          # set if WE start the server (so cleanup only kills our own)
 SERVER_LISTEN_PID=""   # server.py runs with debug=True, so werkzeug's reloader forks a CHILD that
                        # is the process actually bound to :8080. Killing SERVER_PID alone orphans
@@ -120,7 +152,26 @@ bracketed() {
 # PID(s) currently listening on :8080. Matching by PORT, never by `pkill -f "python server.py"` --
 # a command-line pattern also matches any shell whose argv happens to contain that text.
 listener_pids() {
+    if [ "$IS_WIN" = "1" ]; then
+        # Proto  Local-Address  Foreign-Address  State  PID  -> Windows PIDs, for taskkill.
+        netstat -ano -p TCP 2>/dev/null | tr -d '\r' \
+            | awk '$2 ~ /:8080$/ && $4 == "LISTENING" { print $5 }' | sort -u
+        return
+    fi
     ss -lptn 'sport = :8080' 2>/dev/null | grep -oP 'pid=\K[0-9]+' | sort -u
+}
+
+# Kill a process found by listener_pids. On Windows that is a WINDOWS pid of a native
+# python.exe, which bash's kill cannot address; //T also takes any child it spawned.
+kill_listener() {
+    local pid="$1" force="${2:-}"
+    if [ "$IS_WIN" = "1" ]; then
+        taskkill //F //T //PID "$pid" >/dev/null 2>&1 || true
+    elif [ -n "$force" ]; then
+        kill -9 "$pid" >/dev/null 2>&1 || true
+    else
+        kill "$pid" >/dev/null 2>&1 || true
+    fi
 }
 
 server_up() {
@@ -130,6 +181,10 @@ server_up() {
 # Start the Flask coordinator in the background and block until it answers /fp/state.
 # Returns non-zero (and dumps the tail of its log) if it never comes up.
 start_server() {
+    if [ "$IS_WIN" = "1" ]; then
+        start_server_win
+        return
+    fi
     echo "[sweep] starting Flask coordinator (conda env '$CONDA_ENV', core $SERVER_CORE) -> $SERVER_LOG"
     if [ ! -f "$CONDA_SH" ]; then
         echo "[sweep] ERROR: conda.sh not found at $CONDA_SH (set CONDA_SH in the front-end)" >&2
@@ -161,6 +216,39 @@ start_server() {
     return 0
 }
 
+# Windows twin of start_server: no conda and no taskset. $SERVER_PYTHON is the interpreter that
+# has flask (the repo's .venv, set by the front-end). server.py runs WITHOUT the werkzeug
+# reloader on Windows, so the process we start is itself the :8080 listener.
+start_server_win() {
+    echo "[sweep] starting Flask coordinator ($SERVER_PYTHON, core $SERVER_CORE) -> $SERVER_LOG"
+    if [ -z "${SERVER_PYTHON:-}" ] || [ ! -x "$SERVER_PYTHON" ]; then
+        echo "[sweep] ERROR: SERVER_PYTHON not found: '${SERVER_PYTHON:-}' (create the venv; see the" \
+             "front-end's header)" >&2
+        return 1
+    fi
+    ( cd "$SERVER_DIR" && exec "$SERVER_PYTHON" server.py ) >>"$SERVER_LOG" 2>&1 &
+    SERVER_PID=$!
+    for _ in $(seq 1 60); do server_up && break; sleep 0.5; done
+    if ! server_up; then
+        echo "[sweep] ERROR: server did not come up on :8080 (see $SERVER_LOG)" >&2
+        echo "[sweep] --- tail of $SERVER_LOG ---" >&2
+        tail -20 "$SERVER_LOG" >&2 2>/dev/null || true
+        SERVER_PID=""
+        return 1
+    fi
+    SERVER_LISTEN_PID="$(listener_pids | head -1)"
+    # The taskset equivalent: pin the listener to SERVER_CORE. Best-effort -- the coordinator
+    # is idle during a trace, so a failed pin costs nothing measurable.
+    if [ -n "$SERVER_LISTEN_PID" ] && [ -n "${SERVER_CORE:-}" ]; then
+        powershell -NoProfile -NonInteractive -Command \
+            "(Get-Process -Id $SERVER_LISTEN_PID).ProcessorAffinity = $((1 << SERVER_CORE))" \
+            >/dev/null 2>&1 \
+            || echo "[sweep] WARNING: could not pin the server to core $SERVER_CORE (continuing)" >&2
+    fi
+    echo "[sweep] server up (pid $SERVER_PID, listener ${SERVER_LISTEN_PID:-?}), serving $SERVER_DIR"
+    return 0
+}
+
 # The coordinator MUST be reachable before any orchestrator run: without it the browser can never
 # report /fp/ready, so the orchestrator burns its full ready timeout and the whole NoC run is
 # lost. Reuse a live server, otherwise (re)start one.
@@ -171,7 +259,7 @@ ensure_server() {
     if [ -n "$SERVER_PID" ]; then
         echo "[sweep] WARNING: the coordinator we started (pid $SERVER_PID) is gone -- restarting" >&2
         kill "$SERVER_PID" >/dev/null 2>&1 || true   # reap a half-dead process before rebinding :8080
-        [ -n "$SERVER_LISTEN_PID" ] && kill "$SERVER_LISTEN_PID" >/dev/null 2>&1 || true
+        [ -n "$SERVER_LISTEN_PID" ] && kill_listener "$SERVER_LISTEN_PID"
         SERVER_PID=""; SERVER_LISTEN_PID=""
         sleep 1
     fi
@@ -242,6 +330,19 @@ status_push() {
 
 # Reap this stage's Chrome. Used both between NoC runs and on cleanup.
 kill_stage_chrome() {
+    if [ "$IS_WIN" = "1" ]; then
+        # Git Bash's pkill only sees MSYS processes, never a native chrome.exe. Normally the
+        # orchestrator already killed Chrome's whole tree through its Job Object; this is the
+        # backstop. Filtering on Name='chrome.exe' means it cannot match the powershell running
+        # it, so no bracket trick is needed. The profile path is passed as an ENV VAR, not
+        # spliced into the script, so its backslashes need no quoting.
+        WEB_PROFILE="$CHROME_PROFILE" powershell -NoProfile -NonInteractive -Command \
+            'Get-CimInstance Win32_Process -Filter "Name=''chrome.exe''" |
+             Where-Object { $_.CommandLine -and $_.CommandLine.Contains("--user-data-dir=" + $env:WEB_PROFILE) } |
+             ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }' \
+            >/dev/null 2>&1 || true
+        return
+    fi
     $ORCH_SUDO pkill -9 -f "user-data-dir=$(bracketed "$CHROME_PROFILE")" >/dev/null 2>&1 || true
 }
 
@@ -276,7 +377,12 @@ cleanup() {
     # On a terminal Ctrl+C the orchestrator already got SIGINT (same foreground group) and
     # self-tears-down its Chrome; these pkills are a backstop for non-terminal kills. They run
     # under $ORCH_SUDO because a root-launched orchestrator's tree needs root to signal.
-    $ORCH_SUDO pkill -9 -f "$(bracketed "$(basename "$ORCH_BIN")")" >/dev/null 2>&1 || true
+    if [ "$IS_WIN" = "1" ]; then
+        local orch_exe; orch_exe="$(basename "$ORCH_BIN")"
+        taskkill //F //IM "${orch_exe%.exe}.exe" >/dev/null 2>&1 || true
+    else
+        $ORCH_SUDO pkill -9 -f "$(bracketed "$(basename "$ORCH_BIN")")" >/dev/null 2>&1 || true
+    fi
     kill_stage_chrome
     for name in ${EXTRA_PKILL[@]+"${EXTRA_PKILL[@]}"}; do
         $ORCH_SUDO pkill -9 "$name" >/dev/null 2>&1 || true
@@ -284,10 +390,10 @@ cleanup() {
     # Only tear down a server WE started (a pre-existing one belongs to whoever started it).
     if [ -n "$SERVER_PID" ]; then
         kill "$SERVER_PID" >/dev/null 2>&1 || true
-        [ -n "$SERVER_LISTEN_PID" ] && kill "$SERVER_LISTEN_PID" >/dev/null 2>&1 || true
+        [ -n "$SERVER_LISTEN_PID" ] && kill_listener "$SERVER_LISTEN_PID"
         # Backstop: the reloader may have re-forked since we recorded the listener.
         sleep 0.5
-        for p in $(listener_pids); do kill -9 "$p" >/dev/null 2>&1 || true; done
+        for p in $(listener_pids); do kill_listener "$p" force; done
     fi
 }
 
@@ -390,6 +496,20 @@ run_sweep() {
     echo ""
 
     # ---- pre-flight ----
+    if [ "$IS_WIN" = "1" ] && [ "${WEB_ALLOW_SESSION0:-0}" != "1" ]; then
+        # Windows twin of the :0 display requirement (see website_orchestrator.c). Checked here so
+        # an SSH-started sweep stops in seconds instead of failing every batch one by one.
+        local my_session
+        my_session="$(powershell -NoProfile -NonInteractive -Command \
+            "(Get-Process -Id $(cat /proc/$$/winpid)).SessionId" 2>/dev/null | tr -d '\r')"
+        if [ "$my_session" = "0" ]; then
+            echo "[sweep] ERROR: running in Windows session 0 (started over SSH): Chrome would get no" >&2
+            echo "        desktop and no GPU, so the data would not be valid. Start the sweep with" >&2
+            echo "        stable/run_website_sweep_desktop.ps1 instead (WEB_ALLOW_SESSION0=1 overrides" >&2
+            echo "        this, for plumbing-only tests)." >&2
+            exit 2
+        fi
+    fi
     if [ "$NEEDS_XHOST" = "1" ]; then
         # Grant root access to :0 using the SAME display/cookie the orchestrator gives Chrome.
         # Without this Chrome can't reach :0 (~/.Xauthority is the :1 Xtigervnc cookie) and every
@@ -404,7 +524,17 @@ run_sweep() {
     fi
 
     echo "[sweep] building $ORCH_MAKE_TARGET"
-    make "$ORCH_MAKE_TARGET" || { echo "[sweep] build failed" >&2; exit 1; }
+    local build_path="$PATH"
+    if [ "$IS_WIN" = "1" ]; then
+        build_path="$MSYS2_UCRT64_BIN:$PATH"
+        if ! PATH="$build_path" command -v gcc >/dev/null 2>&1; then
+            echo "[sweep] ERROR: gcc not found. Install MSYS2 UCRT64 gcc (pacman -S" \
+                 "mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-make) or set MSYS2_UCRT64_BIN" \
+                 "(now '$MSYS2_UCRT64_BIN')" >&2
+            exit 1
+        fi
+    fi
+    PATH="$build_path" "$MAKE" "$ORCH_MAKE_TARGET" || { echo "[sweep] build failed" >&2; exit 1; }
 
     if [ -n "$ORCH_SUDO" ]; then
         # Verify passwordless sudo FOR THE ORCHESTRATOR ITSELF (so the sweep runs unattended).
@@ -428,6 +558,10 @@ run_sweep() {
     else
         start_server || { echo "[sweep] ABORT: no coordinator, nothing can be collected" >&2; exit 1; }
     fi
+
+    # The orchestrator reads its --user-data-dir from here, so the profile it launches Chrome
+    # with and the one kill_stage_chrome reaps are the same string by construction.
+    export CHROME_PROFILE
 
     # ---- sweep ----
     local FAIL_COUNT=0 i CONFIG RUN_LOG

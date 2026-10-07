@@ -27,6 +27,8 @@
 #   finalize_website.sh <TST> <K> <CPA> <NoC...>
 # Config via environment (exported by the caller; defaults in finalize_lib.sh):
 #   REMOTE_HOST REMOTE_USER REMOTE_DIR PYTHON_BIN LOCAL_H5_DIR DRY_RUN
+#   H5_LABEL   h5 filename stem (default "website"), e.g. H5_LABEL=website_zeev
+#              -> website_zeev_<TST>TST_<K>K_<CPA>cycles.h5
 #
 set -euo pipefail
 
@@ -62,7 +64,7 @@ done
 # 3. h5 name: <label><rerun-index><tail>, e.g. realbrowser_2TST_0K_4576cycles.h5, then
 #    realbrowser2_2TST_0K_4576cycles.h5 for the next sweep with the same parameters.
 # ---------------------------------------------------------------------------
-CLOCK_LABEL="website"
+CLOCK_LABEL="${H5_LABEL:-website}"   # H5_LABEL overrides the stem only; tail + rerun index stay
 NAME_TAIL="_${TST}TST_${K}K_${CPA}cycles.h5"
 
 # ---------------------------------------------------------------------------

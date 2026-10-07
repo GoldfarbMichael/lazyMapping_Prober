@@ -132,7 +132,9 @@ def collect():
 
     n = next_index(directory)
     log_file = os.path.join(directory, f"{n}.csv")
-    with open(log_file, "w") as f:
+    # newline="": write the browser's bytes as-is. Text mode on Windows would otherwise turn
+    # every LF into CRLF, so the same trace would differ byte-for-byte between machines.
+    with open(log_file, "w", newline="") as f:
         f.write(csv_text)
 
     print(f"CSV written to: {log_file} ({len(csv_text)} bytes)")
@@ -269,4 +271,11 @@ def fp_reset():
 if __name__ == "__main__":
     # run on http://localhost:8080. threaded=True so the C driver and the browser can
     # have concurrent in-flight requests without head-of-line blocking each other.
-    app.run(host="0.0.0.0", port=8080, debug=True, threaded=True)
+    #
+    # Windows: no reloader, and loopback only. The reloader re-spawns server.py as a child
+    # process that is the real :8080 listener, which sweep_lib.sh would then have to hunt
+    # down by Windows PID; and binding 0.0.0.0 raises a Windows Firewall prompt that would
+    # block an unattended start. Every client (Chrome, the orchestrator) is on loopback.
+    on_windows = os.name == "nt"
+    app.run(host="127.0.0.1" if on_windows else "0.0.0.0", port=8080, debug=True,
+            threaded=True, use_reloader=not on_windows)

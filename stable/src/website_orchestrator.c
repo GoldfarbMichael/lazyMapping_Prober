@@ -58,10 +58,15 @@
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
-#include <sys/wait.h>
 #include <time.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <mmsystem.h>      // timeBeginPeriod (link -lwinmm)
+#else
+#include <sys/wait.h>
+#endif
 
-#include "mastikElite.h"   // parse_*_from_dirname
+#include "label_parse.h"   // parse_*_from_dirname (no Mastik: this file does no cache probing)
 #include "fp_ctl.h"        // raw-socket HTTP + JSON scalars (shared with fingerprint_orchestrator.c)
 #include "web_victim.h"    // site list + Chrome + CDP victim tab (shared with website_prober.c)
 
@@ -84,12 +89,35 @@
 // instance when --user-data-dir matches, so a shared profile would open the sampler page as
 // a TAB in the other run's window instead of a new browser -- and would make either run's
 // cleanup pkill tear down both.
-#define CHROME_PROFILE "/tmp/chrome-website"
+//
+// $CHROME_PROFILE overrides the default. sweep_lib.sh exports the value it reaps with, so the
+// sweep's backstop kill and this process can never disagree about which browser is ours.
+#define CHROME_PROFILE_DEFAULT "/tmp/chrome-website"
+
+static const char *chrome_profile(void) {
+    static char buf[512];
+    const char *env = getenv("CHROME_PROFILE");
+    if (env && *env) return env;
+#ifdef _WIN32
+    // chrome.exe is a native process: it needs a Windows path, not an MSYS /tmp.
+    const char *tmp = getenv("TEMP");
+    snprintf(buf, sizeof(buf), "%s\\chrome-website", (tmp && *tmp) ? tmp : ".");
+    return buf;
+#else
+    (void)buf;
+    return CHROME_PROFILE_DEFAULT;
+#endif
+}
 
 // Warn if the gap between "sample requested" and "victim navigating" exceeds this. That gap
 // is dead time at the HEAD of the memorygram -- the window where a page load is most
 // distinctive -- so silent drift here would quietly degrade every trace in a long run.
 #define ALIGN_WARN_MS   150
+
+// Warn when Chrome's Efficiency-mode throttling stayed in effect longer than this before the QoS
+// guard (web_victim.c) undid it. The guard polls every 1 ms right after navigation, so anything
+// near this bound means the guard is falling behind.
+#define QOS_WARN_MS     20
 
 static Site  sites[WEB_MAX_SITES];   // Site, the caps, and the loader live in web_victim.h
 static int   num_sites = 0;
@@ -99,9 +127,17 @@ static volatile sig_atomic_t chrome_pid = 0;
 
 // Monotonic milliseconds; used only to measure navigation alignment.
 static double now_ms(void) {
+#ifdef _WIN32
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER t;
+    if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t);
+    return (double)t.QuadPart * 1000.0 / (double)freq.QuadPart;
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -170,11 +206,19 @@ static void usage(const char *prog) {
 // was never pinned, so Chrome inherits an all-cores mask already).
 static pid_t launch_chrome(int noc, int tst, int k, int cycles) {
     char url[256];
+#ifdef _WIN32
+    // 127.0.0.1, not localhost: Windows tries ::1 first, the server is IPv4-only, and each
+    // refused attempt costs ~200 ms. main.js talks to whatever origin it was loaded from,
+    // so this one choice makes every browser->server fetch take the fast path.
+    const char *host = "127.0.0.1";
+#else
+    const char *host = "localhost";
+#endif
     snprintf(url, sizeof(url),
-             "http://localhost:%d/?mode=fingerprint&label=web_%dC_%dTST_%dK_%dcycles",
-             FP_SERVER_PORT, noc, tst, k, cycles);
+             "http://%s:%d/?mode=fingerprint&label=web_%dC_%dTST_%dK_%dcycles",
+             host, FP_SERVER_PORT, noc, tst, k, cycles);
     WebVictimCfg cfg = {
-        .profile_dir  = CHROME_PROFILE,
+        .profile_dir  = chrome_profile(),
         .initial_url  = url,
         .drop_privs   = 0,
         .uid = 0, .gid = 0, .home = NULL,
@@ -197,6 +241,17 @@ static void web_cleanup(int sig) {
     web_pkill_armed();
     _exit(130);
 }
+
+#ifdef _WIN32
+// Ctrl+C / Ctrl+Break / console close. Windows runs this on its own thread, so the teardown
+// (TerminateJobObject + a bounded wait) is safe here, unlike in a POSIX signal handler.
+static BOOL WINAPI web_console_handler(DWORD type) {
+    (void)type;
+    web_pkill_armed();
+    ExitProcess(130);
+    return TRUE;
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Coordinator (Flask, :8080)
@@ -258,6 +313,9 @@ static int wait_done(long seq) {
 // ---------------------------------------------------------------------------
 
 int main(int argc, char **argv) {
+    // Unbuffered: run_website_sweep.sh pipes this through tee, and a native Windows exe writing
+    // to a pipe is fully buffered -- progress would only appear in large bursts.
+    setvbuf(stdout, NULL, _IONBF, 0);
     if (argc < 2) { usage(argv[0]); return 2; }
     const char *arg = argv[1];
 
@@ -299,8 +357,54 @@ int main(int argc, char **argv) {
     num_sites = web_site_list_load(sites_file, sites, WEB_MAX_SITES);
     if (num_sites < 0) return 2;
 
+#ifdef _WIN32
+    // The Windows twin of the Linux DISPLAY=:0 requirement. A process started over SSH lives in
+    // session 0, which has no desktop: Chrome still runs there, but on an invisible window station
+    // with no real GPU, so the victim renders in software and every trace measures the wrong
+    // thing. Refuse that outright (WEB_ALLOW_SESSION0=1 overrides, for plumbing tests only), and
+    // warn when our session is not the one on the monitor (switched user / RDP / locked console).
+    {
+        DWORD sess = 0;
+        ProcessIdToSessionId(GetCurrentProcessId(), &sess);
+        const char *allow = getenv("WEB_ALLOW_SESSION0");
+        if (sess == 0 && !(allow && strcmp(allow, "1") == 0)) {
+            fprintf(stderr, "[web] ERROR: running in Windows session 0 (e.g. from SSH): Chrome would "
+                            "have no desktop and no GPU, so the data would not be valid.\n"
+                            "       Start the sweep with run_website_sweep_desktop.ps1 instead "
+                            "(or set WEB_ALLOW_SESSION0=1 for a plumbing-only test).\n");
+            return 3;
+        }
+        DWORD console = WTSGetActiveConsoleSessionId();
+        if (sess != 0 && sess != console)
+            fprintf(stderr, "[web] WARNING: this is session %lu but the monitor shows session %lu -- "
+                            "Chrome is not on the visible desktop\n", sess, console);
+    }
+#endif
+
     signal(SIGINT,  web_cleanup);
     signal(SIGTERM, web_cleanup);
+#ifdef _WIN32
+    SetConsoleCtrlHandler(web_console_handler, TRUE);
+    // The default Windows timer tick is ~15.6 ms, so wait_started()'s usleep(1000) poll would
+    // really sleep ~15 ms and add that as dead time at the head of every trace. 1 ms restores
+    // the poll cadence the alignment budget (ALIGN_WARN_MS) assumes. Released at process exit.
+    timeBeginPeriod(1);
+    // Windows 11 ignores timer-resolution requests from processes with no visible window --
+    // which is exactly how the desktop launcher runs this (hidden console) -- so the request
+    // above would silently fall back to ~15.6 ms ticks, slowing both wait_started() and the QoS
+    // guard's 1 ms burst polling. Opting out of that throttle (and of EcoQoS) restores 1 ms.
+    {
+        PROCESS_POWER_THROTTLING_STATE pt;
+        memset(&pt, 0, sizeof(pt));
+        pt.Version     = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+        pt.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED |
+                         PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+        pt.StateMask   = 0;
+        if (!SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof(pt)))
+            fprintf(stderr, "[web] WARNING: could not opt out of timer throttling (error %lu); "
+                            "1 ms polls may run at ~15 ms\n", GetLastError());
+    }
+#endif
 
     // Config string drives /collect's path: data/website_{NoC}C_.../{slug}/{n}.csv.
     // Rebuilt from the PARSED values (not copied from argv) so the bare-NoC form and any
@@ -317,12 +421,18 @@ int main(int argc, char **argv) {
     printf("[web] est.   : ~%.1f h wall time\n",
            (double)num_sites * num_samples * (tst + 0.5 + cooldown_us / 1e6 + 1.0) / 3600.0);
     printf("[web] output : data/%s/<site>/<n>.csv\n", config);
+    printf("[web] profile: %s\n", chrome_profile());
 
     // Clear any stale coordinator state (e.g. a "ready" left by a previous, now-dead browser)
     // BEFORE launching Chrome, so wait_ready() only passes on the NEW browser.
     fp_http_post(FP_SERVER_PORT, "/fp/reset", "{}", NULL, 0);
 
-    chrome_pid = launch_chrome(noc, tst, k, cycles);
+    pid_t launched = launch_chrome(noc, tst, k, cycles);
+    if (launched < 0) {
+        fprintf(stderr, "[web] FATAL: could not launch Chrome (see the error above)\n");
+        return 1;
+    }
+    chrome_pid = launched;
     printf("[web] launched chrome (pid %d, sandboxed, unpinned); waiting for mapping build...\n",
            (int)chrome_pid);
 
@@ -336,6 +446,19 @@ int main(int argc, char **argv) {
         web_cleanup(0);
     }
     printf("[web] browser ready (CDP + lazy mapping). starting round-robin collection.\n");
+
+    // Windows: keep Chrome from putting the background sampler in Efficiency mode (see
+    // web_victim.h). No-op elsewhere.
+    web_qos_guard_start();
+#ifdef _WIN32
+    printf("[web] QoS guard: priority class %s; EcoQoS + memory priority restored by the watcher\n",
+           web_qos_priority_locked() ? "pinned at NORMAL by the job"
+                                     : "restored by the watcher (job priority limit refused)");
+#endif
+    long   qos_total_fixes = 0;
+    int    qos_samples_hit = 0, qos_reported = 0;
+    double qos_worst_ms = 0.0, qos_worst_burst_ms = 0.0, qos_worst_pass_ms = 0.0, qos_worst_gap_ms = 0.0;
+    (void)qos_reported;   // only read in the Windows report branch
 
     // Round-robin: outer loop = iteration, inner = site, so every site's samples are spread
     // across the whole run. With LIVE page loads this is what stops the classifier learning
@@ -377,8 +500,12 @@ int main(int argc, char **argv) {
                 continue;
             }
 
-            // 3. Navigate. This is t = 0 of the trace.
+            // 3. Navigate. This is t = 0 of the trace. The QoS guard enters burst polling first:
+            //    backgrounding the sampler is exactly what makes Chrome throttle it.
             double t_started = now_ms();
+            WebQosStats qs;
+            web_qos_guard_take(&qs);   // discard anything from before this trace
+            web_qos_guard_navigated();
             char id[128];
             if (web_victim_open(url, id, sizeof(id)) != 0) {
                 fprintf(stderr, "[web] FATAL: could not open victim tab for %s (%s).\n"
@@ -417,6 +544,34 @@ int main(int argc, char **argv) {
                 collected++;
             }
 
+            // QoS report for this trace: once in full, then only when the throttled window grows
+            // past QOS_WARN_MS -- the same reporting policy as the navigation alignment above.
+            web_qos_guard_take(&qs);
+            if (qs.fixes > 0) {
+                qos_total_fixes += qs.fixes;
+                qos_samples_hit++;
+                if (qs.max_exposure_ms > qos_worst_ms) qos_worst_ms = qs.max_exposure_ms;
+            }
+            if (qs.max_exposure_burst_ms > qos_worst_burst_ms) qos_worst_burst_ms = qs.max_exposure_burst_ms;
+            if (qs.max_pass_ms > qos_worst_pass_ms)    qos_worst_pass_ms = qs.max_pass_ms;
+            if (qs.max_burst_gap_ms > qos_worst_gap_ms) qos_worst_gap_ms  = qs.max_burst_gap_ms;
+#ifdef _WIN32
+            if (qs.max_exposure_ms > QOS_WARN_MS) {
+                fprintf(stderr, "[web] WARNING: Chrome throttled a process for up to %.1f ms before "
+                        "the QoS guard undid it (<= %.1f ms during the post-navigation burst; first "
+                        "correction %.1f ms after navigation; longest pass %.1f ms, longest burst "
+                        "gap %.1f ms)\n", qs.max_exposure_ms, qs.max_exposure_burst_ms,
+                        qs.first_fix_ms, qs.max_pass_ms, qs.max_burst_gap_ms);
+            } else if (!qos_reported) {
+                printf("[web] QoS guard, first trace: %ld correction(s), first %.1f ms after "
+                       "navigation, throttled window <= %.1f ms (<= %.1f ms during the "
+                       "post-navigation burst; longest pass %.1f ms, longest burst gap %.1f ms)\n",
+                       qs.fixes, qs.first_fix_ms, qs.max_exposure_ms, qs.max_exposure_burst_ms,
+                       qs.max_pass_ms, qs.max_burst_gap_ms);
+                qos_reported = 1;
+            }
+#endif
+
             // 5. Close the victim tab: kills its renderer, and with it that page's memory cache.
             web_victim_close(id);
 
@@ -425,11 +580,22 @@ int main(int argc, char **argv) {
         }
     }
 
+    web_qos_guard_stop();
+#ifdef _WIN32
+    printf("[web] QoS guard summary: %ld correction(s) in %d of %d traces, worst throttled "
+           "window <= %.1f ms (<= %.1f ms during post-navigation bursts; longest pass %.1f ms, "
+           "longest burst gap %.1f ms)\n",
+           qos_total_fixes, qos_samples_hit, collected + failed, qos_worst_ms, qos_worst_burst_ms,
+           qos_worst_pass_ms, qos_worst_gap_ms);
+#endif
+
     // Signal the browser to exit its loop and tear down Chrome.
     fp_http_post(FP_SERVER_PORT, "/fp/cmd", "{\"cmd\":\"stop\"}", NULL, 0);
+#ifndef _WIN32
     if (chrome_pid > 0) kill((pid_t)chrome_pid, SIGTERM);
+#endif
     sleep(1);
-    web_pkill_armed();
+    web_pkill_armed();   // Windows: terminates Chrome's job (the whole browser tree)
 
     printf("[web] collection complete: %d samples, %d failed.\n", collected, failed);
     // Nonzero exit makes run_website_sweep.sh count this NoC as failed and skip the finalize,

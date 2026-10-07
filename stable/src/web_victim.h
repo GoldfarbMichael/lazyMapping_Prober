@@ -19,6 +19,11 @@
 //   3. DISPLAY/XAUTHORITY default to :0 and gdm's cookie only when UNSET OR EMPTY. A
 //      set-but-empty DISPLAY (common in non-login shells and cron) would otherwise be
 //      honoured and hand Chrome an unusable display.
+//
+// WINDOWS (_WIN32): Chrome is started with CreateProcess inside a Job Object
+// (KILL_ON_JOB_CLOSE), and teardown terminates that job, which kills the whole browser tree
+// with no command-line matching. (2) and (3) do not apply there; the privilege-drop fields
+// are ignored (the Windows arm never runs elevated).
 // -----------------------------------------------------------------------------
 
 #ifndef WEB_VICTIM_H
@@ -27,9 +32,21 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <sched.h>
 #include <sys/types.h>
 #include <stddef.h>
+
+#ifdef _WIN32
+// No uid/gid or cpu_set_t on Windows. The affinity mask is a plain processor bitmask
+// (SetProcessAffinityMask); the uid/gid fields exist only so the struct stays one shape.
+typedef unsigned int       web_uid_t;
+typedef unsigned int       web_gid_t;
+typedef unsigned long long web_cpu_mask_t;
+#else
+#include <sched.h>
+typedef uid_t     web_uid_t;
+typedef gid_t     web_gid_t;
+typedef cpu_set_t web_cpu_mask_t;
+#endif
 
 #define WEB_MAX_SITES      512
 #define WEB_MAX_SLUG_LEN    64
@@ -54,8 +71,8 @@ typedef struct {
     // but Chrome must not be while visiting live sites. Set drop_privs and Chrome keeps its
     // sandbox as the login user. The JS arm already runs unprivileged and leaves this 0.
     int         drop_privs;
-    uid_t       uid;
-    gid_t       gid;
+    web_uid_t   uid;
+    web_gid_t   gid;
     const char *home;          // HOME for the dropped user; NULL leaves HOME untouched
 
     // Only for the no-SUDO_UID fallback, where Chrome cannot avoid running as root.
@@ -67,7 +84,7 @@ typedef struct {
     // the measurement. set_affinity=0 means "inherit", which is only correct for an
     // unpinned caller.
     int              set_affinity;
-    const cpu_set_t *cpu_mask;
+    const web_cpu_mask_t *cpu_mask;
 } WebVictimCfg;
 
 // ---- Site list ----
@@ -115,6 +132,32 @@ void web_victim_close(const char *id);
 // Returns a fd that MUST be passed to web_victim_open_recv (which closes it), or -1.
 int  web_victim_open_send(const char *url);
 int  web_victim_open_recv(int fd, char *id, size_t id_len);
+
+// ---- QoS guard (Windows; no-ops elsewhere) ----
+// Once a victim tab is in front, Windows Chrome puts the now-background SAMPLER renderer into
+// "Efficiency mode": IDLE priority class + EcoQoS power throttling (measured on Chrome 154; its
+// --disable-renderer-* switches do not prevent it). Desktop Linux Chrome does no such thing, so
+// left alone the Windows traces would be taken under different conditions from the Ubuntu ones.
+//
+// The guard undoes it: the browser's job pins every Chrome process at NORMAL priority class
+// (JOB_OBJECT_LIMIT_PRIORITY_CLASS), and a watcher thread switches EcoQoS (and low memory
+// priority) back off whenever Chrome turns it on -- polling every 10 ms, and every 1 ms for the
+// first 500 ms after each navigation, which is when the demotion happens. WEB_QOS_GUARD=0 turns
+// the watcher off, for A/B measurement.
+typedef struct {
+    long   fixes;             // corrections applied since the last take
+    double first_fix_ms;      // first correction, ms after the last web_qos_guard_navigated(); -1 if none
+    double max_exposure_ms;   // upper bound on how long a process stayed throttled before correction
+    double max_exposure_burst_ms;  // same, for corrections made during a post-navigation burst
+    double max_pass_ms;       // longest single watcher pass (diagnostic)
+    double max_burst_gap_ms;  // longest start-to-start gap between passes during a burst (diagnostic)
+} WebQosStats;
+
+void web_qos_guard_start(void);         // after web_launch_chrome
+void web_qos_guard_navigated(void);     // right after opening a victim tab: enter burst polling
+void web_qos_guard_take(WebQosStats *out);   // stats since the previous take, then reset
+void web_qos_guard_stop(void);
+int  web_qos_priority_locked(void);     // 1 if the job pins the priority class (else the watcher does)
 
 // ---- Teardown ----
 // Kill the browser process tree belonging to `profile_dir`.

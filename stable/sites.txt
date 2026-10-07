@@ -19,130 +19,103 @@
 # the classifier cannot learn time-of-day / network drift instead of the site.
 
 # ---- search / portals ----
-#google	https://www.google.com
-#bing	https://www.bing.com
-#duckduckgo	https://duckduckgo.com
-#yahoo	https://www.yahoo.com
-#yandex	https://yandex.com
-#baidu	https://www.baidu.com
-#ecosia	https://www.ecosia.org
-#brave_search	https://search.brave.com
-
-# ---- reference / wiki ----
-#wikipedia	https://en.wikipedia.org/wiki/Main_Page
-#wiktionary	https://en.wiktionary.org
-#archive_org	https://archive.org
-#wikihow	https://www.wikihow.com
-#britannica	https://www.britannica.com
-#imdb	https://www.imdb.com
-#goodreads	https://www.goodreads.com
-#weather_com	https://weather.com
-
-# ---- news ----
-#bbc	https://www.bbc.com
-#cnn	https://www.cnn.com
-#nytimes	https://www.nytimes.com
-#guardian	https://www.theguardian.com
-#reuters	https://www.reuters.com
-#aljazeera	https://www.aljazeera.com
-#washingtonpost	https://www.washingtonpost.com
-#bloomberg	https://www.bloomberg.com
-#forbes	https://www.forbes.com
-#apnews	https://apnews.com
-#npr	https://www.npr.org
-#cnbc	https://www.cnbc.com
-#ynet	https://www.ynet.co.il
-#haaretz	https://www.haaretz.co.il
-#timesofisrael	https://www.timesofisrael.com
-#dw	https://www.dw.com
-
-# ---- social / forums ----
-#reddit	https://www.reddit.com
-#x_twitter	https://x.com
-#linkedin	https://www.linkedin.com
-#pinterest	https://www.pinterest.com
-#tumblr	https://www.tumblr.com
-#quora	https://www.quora.com
-#medium	https://medium.com
-#substack	https://substack.com
-#hackernews	https://news.ycombinator.com
-#slashdot	https://slashdot.org
-#mastodon	https://mastodon.social
-#vk	https://vk.com
-
-# ---- video / audio (heavy) ----
-#youtube	https://www.youtube.com
-#vimeo	https://vimeo.com
-#twitch	https://www.twitch.tv
-#dailymotion	https://www.dailymotion.com
-#soundcloud	https://soundcloud.com
-#spotify	https://open.spotify.com
-
-
-
-#netflix	https://www.netflix.com
-#bandcamp	https://bandcamp.com
-
-# ---- e-commerce ----
-#amazon	https://www.amazon.com
-#ebay	https://www.ebay.com
-#aliexpress	https://www.aliexpress.com
-etsy	https://www.etsy.com
-walmart	https://www.walmart.com
-target	https://www.target.com
-ikea	https://www.ikea.com
-bestbuy	https://www.bestbuy.com
-booking	https://www.booking.com
-airbnb	https://www.airbnb.com
-tripadvisor	https://www.tripadvisor.com
-alibaba	https://www.alibaba.com
-
-# ---- developer / technical ----
-github	https://github.com
-gitlab	https://gitlab.com
-stackoverflow	https://stackoverflow.com
-mdn	https://developer.mozilla.org
-npmjs	https://www.npmjs.com
-pypi	https://pypi.org
-docker_hub	https://hub.docker.com
-kaggle	https://www.kaggle.com
-huggingface	https://huggingface.co
-arxiv	https://arxiv.org
-sourceforge	https://sourceforge.net
-w3schools	https://www.w3schools.com
-rust_lang	https://www.rust-lang.org
-golang	https://go.dev
-python_org	https://www.python.org
-kernel_org	https://www.kernel.org
-
-# ---- cloud / corporate ----
-microsoft	https://www.microsoft.com
-apple	https://www.apple.com
-adobe	https://www.adobe.com
-ibm	https://www.ibm.com
-oracle	https://www.oracle.com
-salesforce	https://www.salesforce.com
+google	https://www.google.com
 cloudflare	https://www.cloudflare.com
-nvidia	https://www.nvidia.com
-intel	https://www.intel.com
+microsoft	https://www.microsoft.com
+aws	https://aws.amazon.com
+youtube	https://www.youtube.com
+apple	https://www.apple.com
+instagram	https://www.instagram.com
+mail_ru	https://mail.ru
+facebook	https://www.facebook.com
+dzen	https://dzen.ru
+linkedin	https://www.linkedin.com
+office	https://www.office.com
+outlook_live	https://outlook.live.com
+amazon	https://www.amazon.com
+azure	https://azure.microsoft.com
+github	https://github.com
+wikipedia	https://www.wikipedia.org
+netflix	https://www.netflix.com
+gandi	https://www.gandi.net
+digicert	https://www.digicert.com
+wordpress_org	https://wordpress.org
+x_twitter	https://x.com
+skype_teams	https://teams.live.com/free
+icloud	https://www.icloud.com
+tiktok	https://www.tiktok.com
+yahoo	https://www.yahoo.com
+roblox	https://www.roblox.com
+pinterest	https://www.pinterest.com
+cloudflare_net	https://cloudflare.net/home/default.aspx
+spotify	https://open.spotify.com
+adobe	https://www.adobe.com
+msn	https://www.msn.com
+endpoints_news	https://endpoints.news
+myfritz	https://www.myfritz.net
+ntp_org	https://www.ntp.org
+qq	https://www.qq.com
+zoom	https://www.zoom.com
+nginx	https://nginx.org
+chatgpt	https://chatgpt.com
+baidu	https://www.baidu.com
+yandex	https://ya.ru
+vimeo	https://vimeo.com
+opera	https://www.opera.com
+f5	https://www.f5.com
+sentry	https://sentry.io
+windows	https://www.microsoft.com/windows
 samsung	https://www.samsung.com
+telegram	https://telegram.org
 mozilla	https://www.mozilla.org
-wordpress	https://wordpress.com
-
-# ---- education / gov / org ----
-mit	https://www.mit.edu
-stanford	https://www.stanford.edu
-harvard	https://www.harvard.edu
-bgu	https://www.bgu.ac.il
-coursera	https://www.coursera.org
-edx	https://www.edx.org
-khanacademy	https://www.khanacademy.org
-nasa	https://www.nasa.gov
-#who	https://www.who.int
-#nih	https://www.nih.gov
-
-# ---- misc / light pages (useful low-activity contrast classes) ----
-#example	https://example.com
-#httpbin	https://httpbin.org
-#motherfuckingwebsite	https://motherfuckingwebsite.com
-#neverssl	http://neverssl.com
+blogger	https://www.blogger.com
+yuga	https://yuga.com
+actify	https://www.zilverenkruis.nl/gezonder-leven/actify/
+whatsapp	https://www.whatsapp.com
+bing	https://www.bing.com
+fastly	https://www.fastly.com
+reddit	https://www.reddit.com
+ui_com	https://ui.com
+nic_ru	https://nic.ru
+europa_eu	https://european-union.europa.eu
+bitly	https://bitly.com
+snapchat	https://www.snapchat.com
+epicgames	https://www.epicgames.com
+triplinkintl	https://www.triplinkintl.com
+apache	https://apache.org
+vk	https://vk.com
+reg_ru	https://reg.ru
+dropbox	https://www.dropbox.com
+criteo	https://www.criteo.com
+intuit	https://www.intuit.com
+unity	https://unity.com
+nih	https://www.nih.gov
+kaspersky	https://www.kaspersky.com
+discord	https://discord.com
+archive_org	https://archive.org
+godaddy	https://www.godaddy.com
+afternic	https://www.afternic.com
+gravatar	https://gravatar.com
+xiaomi	https://www.mi.com/global/
+tumblr	https://www.tumblr.com
+nytimes	https://www.nytimes.com
+mts	https://mts.ru
+applovin	https://applovin.com
+one_com	https://www.one.com
+paypal	https://www.paypal.com
+shopify	https://www.shopify.com
+letsencrypt	https://letsencrypt.org/docs/lencr.org/
+base_org	https://www.base.org
+bbc	https://www.bbc.com
+sciencedirect	https://www.sciencedirect.com
+ubuntu	https://ubuntu.com
+taboola	https://www.taboola.com
+android	https://www.android.com
+twitch	https://www.twitch.tv
+researchgate	https://www.researchgate.net
+mit	https://web.mit.edu
+ozon	https://www.ozon.ru
+w3c	https://www.w3.org
+steam https://store.steampowered.com/
+webex https://www.webex.com/
+soundcloud https://soundcloud.com/

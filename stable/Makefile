@@ -22,7 +22,7 @@ LDFLAGS = -L$(MASTIK_DIR)/src -lmastik -lm
 # website_prober.c (+ web_victim.c, fp_ctl.c) adds the Stage 4b arm: native Mastik sampler,
 # real-website victim over CDP. Only THIS target links them -- CoverageValidator links
 # mastikElite.o but not fp_ctl.o, so the CDP dependency must not leak into mastikElite.c.
-SRCS = src/main.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c src/lazy_map.c \
+SRCS = src/main.c src/utils.c src/tests.c src/mastikElite.c src/label_parse.c src/murmur3.c src/lazy_map.c \
        src/website_prober.c src/web_victim.c src/fp_ctl.c
 OBJS = $(SRCS:.c=.o)
 
@@ -32,20 +32,31 @@ TARGET = MastikElite
 # Coverage validator (cross-process P+P against the JS lazy mapping).
 # Reuses every non-main object (utils/tests/mastikElite/murmur3) + its own main.
 COV_TARGET = CoverageValidator
-COV_SRCS = src/coverage_validator.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c src/lazy_map.c src/pmu.c
+COV_SRCS = src/coverage_validator.c src/utils.c src/tests.c src/mastikElite.c src/label_parse.c src/murmur3.c src/lazy_map.c src/pmu.c
 COV_OBJS = $(COV_SRCS:.c=.o)
 
 # Fingerprint orchestrator (real-browser Stage 3: drives Chrome JS sampling + stress-ng).
 # Reuses the same non-main objects + its own main.
 FP_TARGET = FingerprintOrchestrator
-FP_SRCS = src/fingerprint_orchestrator.c src/fp_ctl.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c src/lazy_map.c
+FP_SRCS = src/fingerprint_orchestrator.c src/fp_ctl.c src/utils.c src/tests.c src/mastikElite.c src/label_parse.c src/murmur3.c src/lazy_map.c
 FP_OBJS = $(FP_SRCS:.c=.o)
 
 # Website orchestrator (Stage 4: drives Chrome JS sampling + real websites in a second tab).
-# Same object set as FP_SRCS (it needs mastikElite.c's parse_*_from_dirname) + its own main.
+# It does no cache probing, so it needs only the label parsers -- NOT Mastik. Keeping Mastik
+# (mmap, hugepages, pagemap) out of this link is what lets it build natively on Windows.
 WEB_TARGET = WebsiteOrchestrator
-WEB_SRCS = src/website_orchestrator.c src/fp_ctl.c src/web_victim.c src/utils.c src/tests.c src/mastikElite.c src/murmur3.c src/lazy_map.c
+WEB_SRCS = src/website_orchestrator.c src/fp_ctl.c src/web_victim.c src/label_parse.c
 WEB_OBJS = $(WEB_SRCS:.c=.o)
+WEB_LDLIBS =
+
+# Windows (MSYS2 UCRT64 gcc + mingw32-make, driven from Git Bash). Only the website
+# orchestrator is supported there: Winsock for the loopback HTTP, winmm for timeBeginPeriod.
+ifeq ($(OS),Windows_NT)
+WEB_TARGET = WebsiteOrchestrator.exe
+WEB_LDLIBS = -lws2_32 -lwinmm
+.PHONY: WebsiteOrchestrator
+WebsiteOrchestrator: $(WEB_TARGET)
+endif
 
 # Build Rules
 all: $(TARGET)
@@ -60,7 +71,7 @@ $(FP_TARGET): $(FP_OBJS)
 	$(CC) $(CFLAGS) -o $(FP_TARGET) $(FP_OBJS) $(LDFLAGS)
 
 $(WEB_TARGET): $(WEB_OBJS)
-	$(CC) $(CFLAGS) -o $(WEB_TARGET) $(WEB_OBJS) $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $(WEB_TARGET) $(WEB_OBJS) $(WEB_LDLIBS)
 
 # Compile source files into object files
 %.o: %.c

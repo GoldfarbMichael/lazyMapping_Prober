@@ -1,0 +1,11 @@
+# Force LF in the working tree regardless of core.autocrlf. The sweep scripts run under bash
+# (Git Bash on Windows, native on Ubuntu), and bash aborts on a CRLF script with $'\r' errors.
+*.sh        text eol=lf
+Makefile    text eol=lf
+Makefile.in text eol=lf
+*.c         text eol=lf
+*.h         text eol=lf
+*.py        text eol=lf
+*.js        text eol=lf
+*.html      text eol=lf
+stable/sites.txt text eol=lf

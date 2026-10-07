@@ -6,10 +6,29 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+
+#ifdef _WIN32
+// Winsock. Every socket call below goes through this small shim so the protocol code itself
+// has one path on both platforms.
+#include <winsock2.h>
+#include <ws2tcpip.h>
+typedef SOCKET fp_sock_t;
+#define FP_BAD_SOCK INVALID_SOCKET
+#define sock_close(fd)            closesocket(fd)
+#define sock_read(fd, buf, n)     recv((fd), (buf), (int)(n), 0)
+#define sock_write(fd, buf, n)    send((fd), (buf), (int)(n), 0)
+#else
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+typedef int fp_sock_t;
+#define FP_BAD_SOCK (-1)
+#define sock_close(fd)            close(fd)
+#define sock_read(fd, buf, n)     read((fd), (buf), (n))
+#define sock_write(fd, buf, n)    write((fd), (buf), (n))
+#endif
 
 #include "fp_ctl.h"
 
@@ -20,27 +39,59 @@
 // timeout exists purely so a misbehaving peer can never wedge a multi-hour run.
 #define FP_IO_TIMEOUT_S 10
 
+// memmem() is a GNU extension that mingw lacks; one portable copy keeps a single code path.
+static const char *fp_memmem(const char *hay, size_t hlen, const char *needle, size_t nlen) {
+    if (nlen == 0 || hlen < nlen) return NULL;
+    for (size_t i = 0; i + nlen <= hlen; i++)
+        if (memcmp(hay + i, needle, nlen) == 0) return hay + i;
+    return NULL;
+}
+
+#ifdef _WIN32
+// One-time Winsock init, done lazily on the first connect so no caller has to know about it.
+static int wsa_ready(void) {
+    static int ready = 0;
+    if (!ready) {
+        WSADATA wsa;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 0;
+        ready = 1;
+    }
+    return 1;
+}
+#endif
+
 // Open a loopback TCP connection to `port`. -1 on failure.
+//
+// The public API hands the socket around as an int. On Windows a SOCKET is a UINT_PTR, but
+// Winsock socket handles are small kernel handle values that fit in an int, so the cast is
+// lossless in practice.
 static int ctl_connect(int port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
+#ifdef _WIN32
+    if (!wsa_ready()) return -1;
+#endif
+    fp_sock_t fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd == FP_BAD_SOCK) return -1;
+#ifdef _WIN32
+    DWORD tv = FP_IO_TIMEOUT_S * 1000;   // Winsock takes a DWORD of milliseconds, not a timeval
+#else
     struct timeval tv = { .tv_sec = FP_IO_TIMEOUT_S, .tv_usec = 0 };
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof(tv));
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons((uint16_t)port);
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) { close(fd); return -1; }
-    return fd;
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) { sock_close(fd); return -1; }
+    return (int)fd;
 }
 
 // write() can return short on a socket; loop until the whole request is out.
 static int write_all(int fd, const char *buf, size_t len) {
     size_t off = 0;
     while (off < len) {
-        ssize_t n = write(fd, buf + off, len - off);
+        long n = (long)sock_write((fp_sock_t)fd, buf + off, len - off);
         if (n <= 0) return -1;
         off += (size_t)n;
     }
@@ -86,7 +137,7 @@ int fp_http_send(int port, const char *method, const char *path,
     size_t blen = body ? strlen(body) : 0;
     size_t cap  = strlen(method) + strlen(path) + blen + 256;
     char *req = malloc(cap);
-    if (!req) { close(fd); return -1; }
+    if (!req) { sock_close((fp_sock_t)fd); return -1; }
 
     int rlen;
     if (body) {
@@ -105,11 +156,11 @@ int fp_http_send(int port, const char *method, const char *path,
     }
     if (rlen < 0 || (size_t)rlen >= cap) {   // cannot happen with the sizing above; assert it anyway
         fprintf(stderr, "[fp_ctl] request would truncate (%d >= %zu)\n", rlen, cap);
-        free(req); close(fd); return -1;
+        free(req); sock_close((fp_sock_t)fd); return -1;
     }
     if (write_all(fd, req, (size_t)rlen) != 0) {
         fprintf(stderr, "[fp_ctl] write :%d %s %s failed\n", port, method, path);
-        free(req); close(fd); return -1;
+        free(req); sock_close((fp_sock_t)fd); return -1;
     }
     free(req);
     return fd;
@@ -138,15 +189,15 @@ int fp_http_recv(int fd, char *resp, int resp_len) {
     // The whole reply is drained even when the caller discards it: closing early would RST the
     // peer, and Flask's dev server logs that as a broken pipe on every call.
     char *acc = malloc(FP_MAX_RESPONSE + 1);
-    if (!acc) { close(fd); return -1; }
+    if (!acc) { sock_close((fp_sock_t)fd); return -1; }
     size_t total = 0, hdr_end = 0;
     long content_len = -1;
     while (total < FP_MAX_RESPONSE) {
-        ssize_t r = read(fd, acc + total, FP_MAX_RESPONSE - total);
+        long r = (long)sock_read((fp_sock_t)fd, acc + total, FP_MAX_RESPONSE - total);
         if (r <= 0) break;              // EOF, timeout, or error
         total += (size_t)r;
         if (hdr_end == 0) {
-            char *h = memmem(acc, total, "\r\n\r\n", 4);
+            const char *h = fp_memmem(acc, total, "\r\n\r\n", 4);
             if (h) {
                 hdr_end = (size_t)(h - acc) + 4;
                 content_len = parse_content_length(acc, hdr_end);
@@ -162,7 +213,7 @@ int fp_http_recv(int fd, char *resp, int resp_len) {
         resp[n] = '\0';
     }
     free(acc);
-    close(fd);
+    sock_close((fp_sock_t)fd);
     return 0;
 }
 

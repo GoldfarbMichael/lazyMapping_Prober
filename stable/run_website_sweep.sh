@@ -38,7 +38,29 @@
 #
 # Run this AS YOUR NORMAL USER. It starts the server as you (so the CSVs are owned by you) and
 # finalizes with your ssh keys.
+#
+# WINDOWS 11 (run from Git Bash; everything below is auto-detected via uname)
+#   One-time setup:
+#     1. Python venv with the server + finalize deps, at the repo root:
+#          python -m venv .venv
+#          .venv/Scripts/python.exe -m pip install flask flask-cors h5py numpy pandas
+#     2. MSYS2 UCRT64 toolchain (gcc + mingw32-make) at C:\msys64\ucrt64\bin
+#        (pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-make). Another location:
+#        export MSYS2_UCRT64_BIN=/path/to/ucrt64/bin.
+#     3. Google Chrome (found under Program Files / LocalAppData; else export CHROME_PATH).
+#     4. ssh key for $REMOTE_USER@$REMOTE_HOST in C:\Users\<you>\.ssh (status log + backup).
+#        Check: ssh -o BatchMode=yes michael@132.72.67.152 true
+#     5. Plugged in, power mode "Best performance", and sleep disabled for long runs:
+#          powercfg /change standby-timeout-ac 0
+#   Differences from Ubuntu: the server runs from the venv (no conda, no reloader, bound to
+#   127.0.0.1); Chrome runs inside a Job Object, so killing the orchestrator kills its browser;
+#   the Chrome profile lives under %TEMP%; finalize uses scp when rsync is absent.
 set -uo pipefail
+
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) ON_WINDOWS=1 ;;
+    *)                    ON_WINDOWS=0 ;;
+esac
 
 cd "$(dirname "$0")"   # stable/
 SCRIPT_DIR="$(pwd)"
@@ -116,6 +138,14 @@ ORCH_EXTRA_ARGS=("$SITES_FILE")
 CHROME_PROFILE="/tmp/chrome-website"   # MUST differ from Stage 3's: Chrome reuses a running
                                        # instance when --user-data-dir matches, which would open
                                        # the sampler as a tab in the other run's window.
+if [ "$ON_WINDOWS" = "1" ]; then
+    # Name the .exe explicitly: a stale Linux ELF called WebsiteOrchestrator may sit next to it,
+    # and bash would try to run that first.
+    ORCH_BIN="./WebsiteOrchestrator.exe"
+    # chrome.exe is native, so it needs a Windows path. sweep_lib.sh exports this, and the
+    # orchestrator launches Chrome with exactly this --user-data-dir.
+    CHROME_PROFILE="$(cygpath -w "${TEMP:-/tmp}")\\chrome-website"
+fi
 EXTRA_PKILL=()
 NEEDS_XHOST=0                    # Chrome runs as us, so it already has the :0 cookie
 
@@ -152,6 +182,13 @@ REMOTE_HOST="${REMOTE_HOST:-132.72.67.152}"
 REMOTE_USER="${REMOTE_USER:-michael}"
 REMOTE_DIR="${REMOTE_DIR:-/home/michael/michaels_backup_data}"
 LOCAL_H5_DIR="${LOCAL_H5_DIR:-$SCRIPT_DIR/h5}"
+if [ "$ON_WINDOWS" = "1" ]; then
+    # No conda on Windows: the server and csv_to_h5.py both use the repo's venv (see header).
+    # Set before the Linux default below, so an exported PYTHON_BIN still wins on either OS.
+    VENV_PY="$(cd "$SCRIPT_DIR/.." && pwd)/.venv/Scripts/python.exe"
+    SERVER_PYTHON="${SERVER_PYTHON:-$VENV_PY}"
+    PYTHON_BIN="${PYTHON_BIN:-$VENV_PY}"
+fi
 PYTHON_BIN="${PYTHON_BIN:-/home/ubu/anaconda3/envs/PC37/bin/python3}"
 DRY_RUN="${DRY_RUN:-0}"
 

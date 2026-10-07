@@ -27,6 +27,15 @@
 REMOTE_HOST="${REMOTE_HOST:-132.72.67.152}"
 REMOTE_USER="${REMOTE_USER:-michael}"
 REMOTE_DIR="${REMOTE_DIR:-/home/michael/michaels_backup_data}"
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        # Windows: the repo's venv (python3 there is the Microsoft Store stub), in UTF-8 mode
+        # because the machine's code page is not UTF-8. Set here too, not only by the sweep, so
+        # a standalone finalize_website.sh run gets the same interpreter.
+        PYTHON_BIN="${PYTHON_BIN:-$SCRIPT_DIR/../.venv/Scripts/python.exe}"
+        export PYTHONUTF8=1
+        ;;
+esac
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 LOCAL_H5_DIR="${LOCAL_H5_DIR:-$SCRIPT_DIR/h5}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -39,8 +48,17 @@ REMOTE="${REMOTE_USER:+$REMOTE_USER@}$REMOTE_HOST"
 # (the Stage 3 path, and manual DRY_RUN), run directly.
 # ---------------------------------------------------------------------------
 LOGIN_USER="${SUDO_USER:-$(id -un)}"
-USER_HOME="$(getent passwd "$LOGIN_USER" | cut -d: -f6)"
-[ -n "$USER_HOME" ] || USER_HOME="$HOME"
+USER_HOME=""
+command -v getent >/dev/null 2>&1 && USER_HOME="$(getent passwd "$LOGIN_USER" | cut -d: -f6)"
+[ -n "$USER_HOME" ] || USER_HOME="$HOME"   # Git Bash on Windows has no getent
+
+# Windows (Git Bash): no ssh connection multiplexing -- ControlMaster's unix-socket path is
+# unreliable there -- so each of the three remote ops opens its own connection. rsync is
+# usually absent too; the backup then falls back to scp (see the end of finalize_run).
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) FIN_WIN=1 ;;
+    *)                    FIN_WIN=0 ;;
+esac
 
 as_user() {
     if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
@@ -69,6 +87,7 @@ max_index_from_list() {
 }
 
 close_master() {
+    [ "$FIN_WIN" = "1" ] && return 0   # no master was opened
     as_user ssh "${SSH_OPTS[@]}" -O exit "$REMOTE" >/dev/null 2>&1 || true
 }
 
@@ -99,13 +118,17 @@ finalize_run() {
     # -----------------------------------------------------------------------
     # Persistent SSH connection (ControlMaster), reused by the counter scan and rsync.
     # -----------------------------------------------------------------------
-    CM_PATH="$USER_HOME/.ssh/cm-fp-%r@%h:%p"
-    SSH_OPTS=(-o ControlMaster=auto -o "ControlPath=$CM_PATH" -o ControlPersist=60 -o ConnectTimeout=15)
-    trap close_master EXIT
+    if [ "$FIN_WIN" = "1" ]; then
+        SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15)
+    else
+        CM_PATH="$USER_HOME/.ssh/cm-fp-%r@%h:%p"
+        SSH_OPTS=(-o ControlMaster=auto -o "ControlPath=$CM_PATH" -o ControlPersist=60 -o ConnectTimeout=15)
+        trap close_master EXIT
 
-    # Open the master (best-effort; scan/rsync still work per-connection if this fails).
-    as_user ssh "${SSH_OPTS[@]}" -Nf "$REMOTE" 2>/dev/null || \
-        echo "⚠️  could not pre-open SSH master to $REMOTE (will connect per-op)"
+        # Open the master (best-effort; scan/rsync still work per-connection if this fails).
+        as_user ssh "${SSH_OPTS[@]}" -Nf "$REMOTE" 2>/dev/null || \
+            echo "⚠️  could not pre-open SSH master to $REMOTE (will connect per-op)"
+    fi
 
     # -----------------------------------------------------------------------
     # Rerun counter. Highest existing index across LOCAL + REMOTE, +1.
@@ -138,7 +161,7 @@ finalize_run() {
         echo "🔎 DRY_RUN: would build '$H5_PATH' from $DATA_ROOT"
         echo "🔎 DRY_RUN: would rm -rf:"
         for cfg in "${CONFIG_DIRS[@]}"; do echo "     $DATA_ROOT/$cfg"; done
-        echo "🔎 DRY_RUN: would rsync -> $REMOTE:$REMOTE_DIR/"
+        echo "🔎 DRY_RUN: would $(command -v rsync >/dev/null 2>&1 && echo rsync || echo scp) -> $REMOTE:$REMOTE_DIR/"
         exit 0
     fi
 
@@ -165,9 +188,16 @@ finalize_run() {
     # -----------------------------------------------------------------------
     # Backup to the remote archive (append-only; no --delete). Local copy is kept.
     # -----------------------------------------------------------------------
-    echo "☁️  rsync -> $REMOTE:$REMOTE_DIR/ ..."
     as_user ssh "${SSH_OPTS[@]}" "$REMOTE" "mkdir -p '$REMOTE_DIR'"
-    as_user rsync -avz -e "ssh ${SSH_OPTS[*]}" "$H5_PATH" "$REMOTE:$REMOTE_DIR/"
+    if command -v rsync >/dev/null 2>&1; then
+        echo "☁️  rsync -> $REMOTE:$REMOTE_DIR/ ..."
+        as_user rsync -avz -e "ssh ${SSH_OPTS[*]}" "$H5_PATH" "$REMOTE:$REMOTE_DIR/"
+    else
+        # scp copies the one named file, never deletes -- the same append-only semantics as the
+        # rsync above (which runs without --delete).
+        echo "☁️  scp -> $REMOTE:$REMOTE_DIR/ (rsync not installed) ..."
+        as_user scp "${SSH_OPTS[@]}" "$H5_PATH" "$REMOTE:$REMOTE_DIR/"
+    fi
 
     echo "✅ finalize complete: $H5_NAME (local kept at $H5_PATH, backed up to $REMOTE:$REMOTE_DIR/)"
 }

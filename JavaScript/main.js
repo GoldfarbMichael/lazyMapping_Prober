@@ -9,20 +9,28 @@
 // =====================================================================
 
 // ----- Server / experiment config -----
-const COLLECTION_SERVER_URL = "http://localhost:8080/collect";
-const METADATA_SERVER_URL = "http://localhost:8080/set-metadata";
-const CTL_POLL_URL = "http://localhost:8080/ctl/poll"; // coverage-validation coordinator (poll cluster)
-const SAVE_SWEEP_URL = "http://localhost:8080/saveSweepTimes"; // persist /checkSweepingTime results
+// Talk to the server at the SAME origin this page was loaded from. On Linux the orchestrators
+// load http://localhost:8080, so nothing changes there. On Windows the website orchestrator
+// loads http://127.0.0.1:8080 instead: Windows resolves "localhost" to ::1 first, the server
+// listens on IPv4 only, and the refused IPv6 attempt costs ~200 ms per fetch -- dead time
+// that lands at the head of every trace via /fp/poll + /fp/started.
+const SERVER_BASE = window.location.protocol.startsWith("http")
+    ? window.location.origin
+    : "http://localhost:8080";
+const COLLECTION_SERVER_URL = `${SERVER_BASE}/collect`;
+const METADATA_SERVER_URL = `${SERVER_BASE}/set-metadata`;
+const CTL_POLL_URL = `${SERVER_BASE}/ctl/poll`; // coverage-validation coordinator (poll cluster)
+const SAVE_SWEEP_URL = `${SERVER_BASE}/saveSweepTimes`; // persist /checkSweepingTime results
 // Fingerprinting coordinator (?mode=fingerprint): bidirectional handshake with the C
 // orchestrator. Browser reports readiness, polls for sample requests, acks completion.
-const FP_READY_URL = "http://localhost:8080/fp/ready";
-const FP_POLL_URL = "http://localhost:8080/fp/poll";
+const FP_READY_URL = `${SERVER_BASE}/fp/ready`;
+const FP_POLL_URL = `${SERVER_BASE}/fp/poll`;
 // Posted immediately BEFORE the synchronous sampling loop. website_orchestrator.c blocks on
 // it and only then opens the victim tab, so a page load lands at t=0 of the trace. It also
 // gets us past background-tab throttling: creating the victim tab backgrounds this one, and
 // a throttled /fp/poll could otherwise delay the start of sampling by up to a minute.
-const FP_STARTED_URL = "http://localhost:8080/fp/started";
-const FP_DONE_URL = "http://localhost:8080/fp/done";
+const FP_STARTED_URL = `${SERVER_BASE}/fp/started`;
+const FP_DONE_URL = `${SERVER_BASE}/fp/done`;
 
 // ----- Experiment label (drives sampling params + storage path) -----
 // Format: {workload}_{NoC}C_{TST}TST_{K}K_{CYCLES}cycles
