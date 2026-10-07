@@ -48,7 +48,8 @@ SCRIPT_DIR="$(pwd)"
 # ============================================
 # Spatial sweep: one orchestrator run per NoC. Powers of two in [1,64] (the Lazy Mapping regime).
 # NOCS=(1 2 4 8 16 32 64)
-NOCS=(1)
+NOCS=(4 8 16 32 64)
+
 
 # NOCS=(16)
 
@@ -62,7 +63,7 @@ K=180
 # rows T = floor(TST_ms / (Q * NoC)).
 CYCLES_PER_ADDRESS=2288
 # Samples collected per SITE, per NoC.
-SAMPLES_PER_CLASS=1
+SAMPLES_PER_CLASS=100
 
 # ---- BATCHING: how many samples/site one orchestrator invocation collects ----
 #
