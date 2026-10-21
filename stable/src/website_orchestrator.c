@@ -47,6 +47,24 @@
 // Parameters arrive as the SAME config label the rest of the project uses --
 // {NoC}C_{TST}TST_{K}K_{CYCLES}cycles -- so an experiment's tuple travels unchanged from
 // run_website_sweep.sh -> here -> the JS URL -> the CSV tree -> the .h5 filename.
+//
+// NOISE INJECTION (NOISE_P > 0): FlipStress (Basak et al., SecureComm 2025)
+// The FlipStress defense -- p web workers that all switch to a randomly chosen cache stressor
+// every 500 ms -- runs in a NOISE TAB opened FIRST, before the sampler. Tab order is
+// noise | sampler | victim, so closing the victim (the last tab) re-activates the sampler
+// exactly as in the noiseless layout. The noise is started ONCE per Chrome (= once per batch)
+// and is deliberately NOT synchronised to samples: the defense runs continuously, unaware of
+// the attacker, and restarting it per sample would put the same flip phase at t=0 of every
+// trace. Instead:
+//   * wait_noise_ready() blocks on the tab's "ready" (all workers built their buffers) before
+//     the sampler is even opened -- a fixed sleep would give the FIRST site of every round
+//     weaker noise, a bias that tracks the class label;
+//   * noise_check() runs before every sample request AND after every trace. A noise tab that
+//     died or stalled aborts the run, so a website_p*flip tree never silently holds un-noised
+//     traces.
+// The schedule seed is NOISE_SEED_BASE + BATCH (both from the sweep), so every batch's
+// stressor sequence is reproducible and logged. Noisy data goes to website_p{p}flip_..., never
+// into the clean website_... tree. NOISE_P = 0 is the original code path, unchanged.
 // -----------------------------------------------------------------------------
 
 #define _GNU_SOURCE
@@ -90,6 +108,16 @@
 // is dead time at the HEAD of the memorygram -- the window where a page load is most
 // distinctive -- so silent drift here would quietly degrade every trace in a long run.
 #define ALIGN_WARN_MS   150
+
+// ---- FlipStress noise tab (NOISE_P > 0) ----
+#define NOISE_MAX_P            16    // keep in sync with flipstress/noise.html MAX_P
+#define DEF_NOISE_LLC_MB       12    // stressor buffer size; = LLC_SIZE_MB in JavaScript/main.js
+#define NOISE_MAX_LLC_MB       64
+#define NOISE_READY_TIMEOUT_S 180    // p workers x 7 stressors' buffers; grows with p
+// The tab posts a heartbeat at most once per second, driven by worker flips (~every 500 ms),
+// so a healthy beat is <~1.5 s old. Older than this, or the slowest worker's flip count
+// frozen this long, means the noise is gone.
+#define NOISE_STALE_MS       3000
 
 static Site  sites[WEB_MAX_SITES];   // Site, the caps, and the loader live in web_victim.h
 static int   num_sites = 0;
@@ -149,16 +177,20 @@ static void sleep_us(int usec) {
 static void usage(const char *prog) {
     fprintf(stderr,
         "usage: %s <config|NoC> [SAMPLES] [COOLDOWN_US] [SITES_FILE]\n"
+        "                [NOISE_P] [NOISE_LLC_MB] [NOISE_SEED_BASE] [BATCH]\n"
         "  <config>      config label, e.g. 16C_6TST_180K_2288cycles -- NoC/TST/K/cycles come from it\n"
         "  <NoC>         bare power of two in [1,64]; TST/K/cycles fall back to the defaults\n"
         "                (%dTST, %dK, %dcycles)\n"
         "  [SAMPLES]     samples per site                (default %d)\n"
         "  [COOLDOWN_US] cooldown between samples, MICROSECONDS (default %d = %.2f s)\n"
         "  [SITES_FILE]  '<slug>\\t<url>' per line, '#' comments (default %s)\n"
+        "  [NOISE_P]     FlipStress workers in a noise tab opened first, 0..%d (default 0 = off)\n"
+        "  [NOISE_LLC_MB] stressor buffer size, MB      (default %d)\n"
+        "  [NOISE_SEED_BASE] [BATCH]  flip-schedule seed = base + batch (defaults 0, 1)\n"
         "\n"
         "Runs as the LOGIN USER -- no sudo. Chrome keeps its sandbox.\n",
         prog, DEF_WS_TST, DEF_WS_K, DEF_WS_CYCLES, DEF_NUM_SAMPLES,
-        DEF_COOLDOWN_US, DEF_COOLDOWN_US / 1e6, DEF_SITES_FILE);
+        DEF_COOLDOWN_US, DEF_COOLDOWN_US / 1e6, DEF_SITES_FILE, NOISE_MAX_P, DEF_NOISE_LLC_MB);
 }
 
 // ---------------------------------------------------------------------------
@@ -168,14 +200,12 @@ static void usage(const char *prog) {
 // The Stage 4 JS arm runs UNPRIVILEGED and UNPINNED, so it takes web_victim's defaults for
 // both: no privilege drop (there is nothing to drop from) and no affinity mask (this process
 // was never pinned, so Chrome inherits an all-cores mask already).
-static pid_t launch_chrome(int noc, int tst, int k, int cycles) {
-    char url[256];
-    snprintf(url, sizeof(url),
-             "http://localhost:%d/?mode=fingerprint&label=web_%dC_%dTST_%dK_%dcycles",
-             FP_SERVER_PORT, noc, tst, k, cycles);
+// `initial_url` is the sampler page, or the noise page when NOISE_P > 0 (the sampler then
+// follows as a second tab, see main).
+static pid_t launch_chrome(const char *initial_url) {
     WebVictimCfg cfg = {
         .profile_dir  = CHROME_PROFILE,
-        .initial_url  = url,
+        .initial_url  = initial_url,
         .drop_privs   = 0,
         .uid = 0, .gid = 0, .home = NULL,
         .no_sandbox   = 0,   // not root -> the zygote sandbox works, and it is worth keeping
@@ -256,6 +286,84 @@ static int wait_done(long seq) {
 }
 
 // ---------------------------------------------------------------------------
+// FlipStress noise tab (server.py /noise/*)
+// ---------------------------------------------------------------------------
+
+// Stall tracking for noise_check(): the slowest worker's flip count, and when it last rose.
+static long   noise_last_flips  = -1;
+static double noise_last_adv_ms = 0;
+static int    noise_mismatch_reported = 0;
+
+// Block until every noise worker has built its buffers and is flipping, then print the
+// launch's seed and schedule into the run log. Fails fast on a reported page error.
+// Returns 0, or -1.
+static int wait_noise_ready(void) {
+    char resp[1024], err[256];
+    for (int s = 0; s < NOISE_READY_TIMEOUT_S; s++) {
+        if (fp_http_get(FP_SERVER_PORT, "/noise/state", resp, sizeof(resp)) == 0) {
+            if (fp_json_str(resp, "error", err, sizeof(err)) == 0 && err[0]) {
+                fprintf(stderr, "[web] FATAL: noise tab reported: %s\n", err);
+                return -1;
+            }
+            if (fp_json_bool(resp, "ready")) {
+                char sched[256] = "?";
+                fp_json_str(resp, "schedule", sched, sizeof(sched));
+                printf("[web] noise ready: p=%ld llc=%ldMB seed=%ld init=%ldms (%d s wait) "
+                       "schedule=[%s...]\n",
+                       fp_json_int(resp, "p", -1), fp_json_int(resp, "llc_mb", -1),
+                       fp_json_int(resp, "seed", -1), fp_json_int(resp, "init_ms", -1), s, sched);
+                fflush(stdout);
+                noise_last_flips  = -1;
+                noise_last_adv_ms = now_ms();
+                return 0;
+            }
+        }
+        sleep(1);
+    }
+    fprintf(stderr, "[web] FATAL: noise tab never became ready within %d s\n", NOISE_READY_TIMEOUT_S);
+    return -1;
+}
+
+// Is the noise still running? Checks: no page error, a fresh heartbeat, and the SLOWEST
+// worker's flip count still rising (a single stalled worker would otherwise hide behind the
+// others' heartbeats). A schedule mismatch does not abort -- the cache is still being
+// stressed -- but it means the logged schedule is wrong, so it is reported loudly once.
+// Returns 0 if healthy, -1 (with the reason printed) if not.
+static int noise_check(void) {
+    char resp[1024], err[256];
+    if (fp_http_get(FP_SERVER_PORT, "/noise/state", resp, sizeof(resp)) != 0) {
+        fprintf(stderr, "[web] noise: /noise/state unreachable\n");
+        return -1;
+    }
+    if (fp_json_str(resp, "error", err, sizeof(err)) == 0 && err[0]) {
+        fprintf(stderr, "[web] noise: tab reported: %s\n", err);
+        return -1;
+    }
+    long age = fp_json_int(resp, "beat_age_ms", -1);
+    if (age < 0 || age > NOISE_STALE_MS) {
+        fprintf(stderr, "[web] noise: heartbeat stale (%ld ms, limit %d ms)\n", age, NOISE_STALE_MS);
+        return -1;
+    }
+    double t = now_ms();
+    long flips = fp_json_int(resp, "min_flips", -1);
+    if (flips > noise_last_flips) {
+        noise_last_flips  = flips;
+        noise_last_adv_ms = t;
+    } else if (t - noise_last_adv_ms > NOISE_STALE_MS) {
+        fprintf(stderr, "[web] noise: slowest worker stuck at %ld flips for %.0f ms\n",
+                flips, t - noise_last_adv_ms);
+        return -1;
+    }
+    long mism = fp_json_int(resp, "mismatches", 0);
+    if (mism > 0 && !noise_mismatch_reported) {
+        fprintf(stderr, "[web] WARNING: noise workers deviated from the logged schedule "
+                        "(%ld flip(s)) -- the run's seed no longer reproduces its noise\n", mism);
+        noise_mismatch_reported = 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 
 int main(int argc, char **argv) {
     if (argc < 2) { usage(argv[0]); return 2; }
@@ -287,6 +395,12 @@ int main(int argc, char **argv) {
     if (argc > 3) { cooldown_us = parse_nonneg_arg(argv[3], "COOLDOWN_US"); if (cooldown_us < 0) return 2; }
     if (argc > 4) { sites_file  = argv[4]; }
 
+    int noise_p = 0, noise_llc_mb = DEF_NOISE_LLC_MB, noise_seed_base = 0, batch = 1;
+    if (argc > 5) { noise_p         = parse_nonneg_arg(argv[5], "NOISE_P");         if (noise_p < 0) return 2; }
+    if (argc > 6) { noise_llc_mb    = parse_nonneg_arg(argv[6], "NOISE_LLC_MB");    if (noise_llc_mb < 0) return 2; }
+    if (argc > 7) { noise_seed_base = parse_nonneg_arg(argv[7], "NOISE_SEED_BASE"); if (noise_seed_base < 0) return 2; }
+    if (argc > 8) { batch           = parse_nonneg_arg(argv[8], "BATCH");           if (batch < 0) return 2; }
+
     // Validate EVERYTHING before launching Chrome: a bad tuple or site list must cost seconds,
     // not a multi-hour run that writes a mislabelled tree.
     if (!is_pow2_le64(noc)) {
@@ -295,6 +409,19 @@ int main(int argc, char **argv) {
     if (tst < 1)        { fprintf(stderr, "[web] ERROR: TST must be >= 1 s, got %d\n", tst); return 2; }
     if (cycles < 1)     { fprintf(stderr, "[web] ERROR: cycles/address must be >= 1, got %d\n", cycles); return 2; }
     if (num_samples < 1){ fprintf(stderr, "[web] ERROR: SAMPLES must be >= 1, got %d\n", num_samples); return 2; }
+    if (noise_p > NOISE_MAX_P) {
+        fprintf(stderr, "[web] ERROR: NOISE_P must be in [0,%d], got %d\n", NOISE_MAX_P, noise_p); return 2;
+    }
+    if (noise_llc_mb < 1 || noise_llc_mb > NOISE_MAX_LLC_MB) {
+        fprintf(stderr, "[web] ERROR: NOISE_LLC_MB must be in [1,%d], got %d\n", NOISE_MAX_LLC_MB, noise_llc_mb);
+        return 2;
+    }
+    // The seed must fit noise.html's [0, 2^31-1] (keeps the JS LCG's first multiply exact).
+    if ((long)noise_seed_base + batch > INT_MAX) {
+        fprintf(stderr, "[web] ERROR: NOISE_SEED_BASE + BATCH overflows (%d + %d)\n", noise_seed_base, batch);
+        return 2;
+    }
+    const long noise_seed = (long)noise_seed_base + batch;
 
     num_sites = web_site_list_load(sites_file, sites, WEB_MAX_SITES);
     if (num_sites < 0) return 2;
@@ -307,10 +434,21 @@ int main(int argc, char **argv) {
     // zero-padded label still produce the canonical dir name finalize_website.sh expects.
     // The "website_" tag keeps this tree disjoint from Stage 3's "realbrowser_" tree and from
     // the BARE {NoC}C_... dirs a manual single-shot browser run writes under the same root.
+    // With noise, "website_p{p}flip_" keeps noisy traces out of the clean tree. The tag holds no
+    // "C_", so mastikElite.c's parse_NoC_from_dirname and csv_to_h5.py's NOC_RE still find the
+    // NoC field. run_website_sweep.sh composes the SAME tag as its STAGE_TAG.
+    char tag[32];
+    if (noise_p > 0) snprintf(tag, sizeof(tag), "website_p%dflip", noise_p);
+    else             snprintf(tag, sizeof(tag), "website");
     char config[128];
-    snprintf(config, sizeof(config), "website_%dC_%dTST_%dK_%dcycles", noc, tst, k, cycles);
+    snprintf(config, sizeof(config), "%s_%dC_%dTST_%dK_%dcycles", tag, noc, tst, k, cycles);
 
     printf("[web] config : NoC=%d  TST=%ds  K=%d  cycles/addr=%d\n", noc, tst, k, cycles);
+    if (noise_p > 0)
+        printf("[web] noise  : FlipStress p=%d llc=%dMB seed=%ld (base %d + batch %d)\n",
+               noise_p, noise_llc_mb, noise_seed, noise_seed_base, batch);
+    else
+        printf("[web] noise  : off\n");
     printf("[web] sites  : %d from %s\n", num_sites, sites_file);
     printf("[web] plan   : %d sites x %d samples = %d samples, %d us (%.3f s) cooldown each\n",
            num_sites, num_samples, num_sites * num_samples, cooldown_us, cooldown_us / 1e6);
@@ -321,14 +459,44 @@ int main(int argc, char **argv) {
     // Clear any stale coordinator state (e.g. a "ready" left by a previous, now-dead browser)
     // BEFORE launching Chrome, so wait_ready() only passes on the NEW browser.
     fp_http_post(FP_SERVER_PORT, "/fp/reset", "{}", NULL, 0);
+    fp_http_post(FP_SERVER_PORT, "/noise/reset", "{}", NULL, 0);
 
-    chrome_pid = launch_chrome(noc, tst, k, cycles);
-    printf("[web] launched chrome (pid %d, sandboxed, unpinned); waiting for mapping build...\n",
-           (int)chrome_pid);
+    char sampler_url[256];
+    snprintf(sampler_url, sizeof(sampler_url),
+             "http://localhost:%d/?mode=fingerprint&label=web_%dC_%dTST_%dK_%dcycles",
+             FP_SERVER_PORT, noc, tst, k, cycles);
 
-    if (web_wait_cdp(CDP_TIMEOUT_S) != 0) {
-        fprintf(stderr, "[web] FATAL: DevTools endpoint never came up on :%d\n", FP_CDP_PORT);
-        web_cleanup(0);
+    if (noise_p > 0) {
+        // Noise tab FIRST: the stressors are flipping before the sampler exists, so even the
+        // first sample of the batch sees full-strength noise.
+        char noise_url[256];
+        snprintf(noise_url, sizeof(noise_url),
+                 "http://localhost:%d/flipstress/noise.html?p=%d&llc_mb=%d&seed=%ld",
+                 FP_SERVER_PORT, noise_p, noise_llc_mb, noise_seed);
+        chrome_pid = launch_chrome(noise_url);
+        printf("[web] launched chrome (pid %d, sandboxed, unpinned) on the noise tab; "
+               "waiting for %d worker(s) to initialize...\n", (int)chrome_pid, noise_p);
+        if (web_wait_cdp(CDP_TIMEOUT_S) != 0) {
+            fprintf(stderr, "[web] FATAL: DevTools endpoint never came up on :%d\n", FP_CDP_PORT);
+            web_cleanup(0);
+        }
+        if (wait_noise_ready() != 0) web_cleanup(0);
+
+        // Sampler as the SECOND tab. Its target id is not needed: it lives until teardown.
+        char sampler_id[128];
+        if (web_victim_open(sampler_url, sampler_id, sizeof(sampler_id)) != 0) {
+            fprintf(stderr, "[web] FATAL: could not open the sampler tab\n");
+            web_cleanup(0);
+        }
+        printf("[web] sampler tab opened; waiting for mapping build...\n");
+    } else {
+        chrome_pid = launch_chrome(sampler_url);
+        printf("[web] launched chrome (pid %d, sandboxed, unpinned); waiting for mapping build...\n",
+               (int)chrome_pid);
+        if (web_wait_cdp(CDP_TIMEOUT_S) != 0) {
+            fprintf(stderr, "[web] FATAL: DevTools endpoint never came up on :%d\n", FP_CDP_PORT);
+            web_cleanup(0);
+        }
     }
     if (wait_ready() != 0) {
         fprintf(stderr, "[web] FATAL: browser never became ready (is the server running on :%d, "
@@ -356,6 +524,14 @@ int main(int argc, char **argv) {
                 web_diagnose_chrome_death((pid_t)chrome_pid);
                 fprintf(stderr, "[web] FATAL: Chrome/DevTools is gone; aborting so the run does "
                                 "not fill with victim-less traces. CSVs so far are intact.\n");
+                web_cleanup(0);
+            }
+            // 0b. Noise gate, also OUTSIDE the trace window: never start a noisy-tree trace
+            //     without live noise.
+            if (noise_p > 0 && noise_check() != 0) {
+                fprintf(stderr, "[web] FATAL: FlipStress noise is not running; aborting so "
+                                "data/%s/ does not fill with un-noised traces. CSVs so far are "
+                                "intact.\n", config);
                 web_cleanup(0);
             }
 
@@ -415,6 +591,16 @@ int main(int argc, char **argv) {
                 failed++;
             } else {
                 collected++;
+            }
+
+            // 4b. Post-trace noise gate: the heartbeat is <= NOISE_STALE_MS old, so the noise
+            //     was alive up to the end of the trace that was just written.
+            if (noise_p > 0 && noise_check() != 0) {
+                fprintf(stderr, "[web] FATAL: FlipStress noise stopped during this trace -- "
+                                "DELETE the newest CSV in data/%s/%s/ before reusing this tree.\n",
+                        config, slug);
+                web_victim_close(id);
+                web_cleanup(0);
             }
 
             // 5. Close the victim tab: kills its renderer, and with it that page's memory cache.

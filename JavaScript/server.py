@@ -36,6 +36,15 @@ fp = {"seq": 0, "cmd": "idle", "workload": "", "ready": False,
       "started_seq": -1,
       "done_seq": -1}
 
+# FlipStress noise-tab state (Stage 4, NOISE_P > 0). One-way health reporting: the noise tab
+# (flipstress/noise.html) reports ready + a ~1 s heartbeat; website_orchestrator.c waits on
+# "ready" before opening the sampler and checks the heartbeat before EVERY sample, so a
+# website_p*flip tree can never silently hold un-noised traces. last_beat is server-side
+# monotonic time, so beat_age_ms needs no clock agreement with the browser.
+NOISE_INITIAL = {"ready": False, "error": "", "p": 0, "llc_mb": 0, "seed": -1, "init_ms": -1,
+                 "schedule": "", "min_flips": -1, "mismatches": 0, "last_beat": None}
+noise = dict(NOISE_INITIAL)
+
 
 # A workload/config string becomes a DIRECTORY NAME below, so it must be a single safe path
 # component. Without this, os.path.join() quietly does the wrong thing rather than failing:
@@ -263,6 +272,56 @@ def fp_reset():
     # browser has built its mapping. Returns the coordinator to its initial state.
     fp.update(seq=0, cmd="idle", workload="", ready=False, started_seq=-1, done_seq=-1)
     print("fp: reset")
+    return jsonify(status="ok"), 200
+
+
+# ---- FlipStress noise tab (noise.html <-> C orchestrator) ----
+
+@app.route("/noise/ready", methods=["POST"])
+def noise_ready():
+    # Noise tab: all p workers built their buffers and are flipping. The seed is printed so
+    # website_server.log records every launch's schedule alongside the per-batch run log.
+    data = request.get_json(force=True, silent=True) or {}
+    noise.update(ready=True, p=int(data.get("p", 0)), llc_mb=int(data.get("llc_mb", 0)),
+                 seed=int(data.get("seed", -1)), init_ms=int(data.get("init_ms", -1)),
+                 schedule=str(data.get("schedule", "")), last_beat=time.monotonic())
+    print(f"noise: ready p={noise['p']} llc_mb={noise['llc_mb']} seed={noise['seed']} "
+          f"init_ms={noise['init_ms']} schedule=[{noise['schedule']}]")
+    return jsonify(status="ok"), 200
+
+
+@app.route("/noise/beat", methods=["POST"])
+def noise_beat():
+    data = request.get_json(force=True, silent=True) or {}
+    noise.update(min_flips=int(data.get("min_flips", -1)),
+                 mismatches=int(data.get("mismatches", 0)), last_beat=time.monotonic())
+    return jsonify(status="ok"), 200
+
+
+@app.route("/noise/error", methods=["POST"])
+def noise_error():
+    data = request.get_json(force=True, silent=True) or {}
+    noise["error"] = str(data.get("reason", "unknown"))[:200]
+    print(f"noise: ERROR {noise['error']}")
+    return jsonify(status="ok"), 200
+
+
+@app.route("/noise/state", methods=["GET"])
+def noise_state():
+    age = -1 if noise["last_beat"] is None else int((time.monotonic() - noise["last_beat"]) * 1000)
+    return jsonify(ready=noise["ready"], error=noise["error"], p=noise["p"],
+                   llc_mb=noise["llc_mb"], seed=noise["seed"], init_ms=noise["init_ms"],
+                   schedule=noise["schedule"], min_flips=noise["min_flips"],
+                   mismatches=noise["mismatches"], beat_age_ms=age), 200
+
+
+@app.route("/noise/reset", methods=["POST"])
+def noise_reset():
+    # Called by the orchestrator BEFORE launching Chrome, next to /fp/reset, so a previous
+    # batch's "ready" or heartbeat can never vouch for the new browser's noise tab.
+    noise.clear()
+    noise.update(NOISE_INITIAL)
+    print("noise: reset")
     return jsonify(status="ok"), 200
 
 

@@ -47,8 +47,8 @@ SCRIPT_DIR="$(pwd)"
 # Configuration — the experiment parameters
 # ============================================
 # Spatial sweep: one orchestrator run per NoC. Powers of two in [1,64] (the Lazy Mapping regime).
-# NOCS=(1 2 4 8 16 32 64)
-NOCS=(4 8 16 32 64)
+NOCS=(1 2 4 8 16 32 64)
+# NOCS=(8 16)
 
 
 # NOCS=(16)
@@ -56,7 +56,7 @@ NOCS=(4 8 16 32 64)
 # Total sampling time per trace, in seconds ("{N}TST"). Unlike stress-ng, a page load is a
 # TRANSIENT: the discriminative signal is concentrated in the first seconds after navigation,
 # which is why the orchestrator aligns t=0 to navigation start. 6 s comfortably covers a load.
-TST=2
+TST=4
 # Accesses between timer polls ("{N}K"); 0 selects the DYNAMIC-K sweep.
 K=180
 # Cycles per address ("{N}cycles"); sizes the JS cluster quantum, so it sets temporal resolution:
@@ -93,6 +93,36 @@ BATCH_COOLDOWN_S=3
 # 100 batches x 7 NoCs = 700 synchronous ssh round-trips.
 STATUS_PER_BATCH="${STATUS_PER_BATCH:-0}"
 
+# ---- NOISE INJECTION: FlipStress (Basak, Phan, Oren, Curtmola -- SecureComm 2025) ----
+#
+# NOISE_P=0  -> off. The original Stage 4 path, unchanged: same tabs, same data tree.
+# NOISE_P=N  -> every Chrome launch opens a NOISE TAB FIRST (JavaScript/flipstress/noise.html),
+#               running N FlipStress workers that all switch to a randomly chosen cache stressor
+#               every 500 ms; the sampler opens as the second tab, the victim as the third.
+#
+# The noise runs CONTINUOUSLY and is NOT synchronised to samples -- that is the defense's
+# threat model (it does not know when the attacker measures). It starts once per Chrome (= per
+# batch), and the orchestrator waits for every worker's buffers to be built before it opens the
+# sampler, then checks the heartbeat before and after EVERY trace and aborts if the noise died.
+#
+# Reproducibility: the flip schedule's seed is NOISE_SEED_BASE + <batch number>. The batch
+# number restarts at 1 per NoC, so batch b has the SAME schedule at every NoC (a paired
+# design), and re-running with the same base repeats every schedule. Each batch's run log and
+# website_server.log record the seed and the first 16 flips. Change NOISE_SEED_BASE for a fresh,
+# still reproducible set of schedules. NB: a seed fixes WHICH stressor runs in each 500 ms slot,
+# not the noise itself -- the flip phase at a trace's t=0, and the cache, are not deterministic.
+#
+# Data goes to website_p{N}flip_<NoC>C_... (and website_p{N}flip_...h5), never into the clean tree.
+#
+# Cost: this box is 6C/12T. N > 6 also competes with the sampler and victim renderers for
+# cores (the paper's best result used N = 12 = all physical cores of its 12-core CPU).
+# Measured at NOISE_LLC_MB=12: ~350 MB of renderer memory per worker (p=2 -> 745 MB noise
+# renderer), so p=12 is ~4.2 GB of this box's 15 GB; worker init is ~0.7-1 s, paid once per batch.
+NOISE_P="${NOISE_P:-0}"
+# Stressor buffer size, MB. Upstream hard-coded 18 (the authors' L3); 12 = this box's L3.
+NOISE_LLC_MB="${NOISE_LLC_MB:-12}"
+NOISE_SEED_BASE="${NOISE_SEED_BASE:-0}"
+
 # Cooldown between samples, MICROSECONDS (500000 = 0.5 s).
 SAMPLE_COOLDOWN_US=500000
 # Settle time between NoC runs (after tearing down that run's Chrome profile).
@@ -106,14 +136,26 @@ SITES_FILE="${SITES_FILE:-$SCRIPT_DIR/sites.txt}"
 # Stage identity / runner (sweep_lib.sh contract)
 # ============================================
 SWEEP_TITLE="REAL-BROWSER WEBSITE FINGERPRINTING SWEEP (STAGE 4)"
-STAGE_TAG="website"              # the tag website_orchestrator.c prepends to the config dir
-LOG_PREFIX="web"
+# STAGE_TAG is the tag website_orchestrator.c prepends to the config dir, and MUST match its
+# composition: "website", or "website_p{N}flip" with noise. Exported as WEBSITE_TAG so
+# finalize_website.sh packs the same tree. (A malformed NOISE_P falls to the else branch here
+# and is rejected by the validation below, before anything runs.)
+if [ "$NOISE_P" -gt 0 ] 2>/dev/null; then
+    STAGE_TAG="website_p${NOISE_P}flip"
+    LOG_PREFIX="web_p${NOISE_P}flip"   # noisy and clean run logs must not be confusable
+    SWEEP_TITLE="$SWEEP_TITLE + FLIPSTRESS NOISE (p=$NOISE_P, ${NOISE_LLC_MB}MB, seed base $NOISE_SEED_BASE)"
+else
+    STAGE_TAG="website"
+    LOG_PREFIX="web"
+fi
+export WEBSITE_TAG="$STAGE_TAG"
 CLASS_NOUN="site"
 
 ORCH_BIN="./WebsiteOrchestrator"
 ORCH_MAKE_TARGET="WebsiteOrchestrator"
 ORCH_SUDO=""                     # no pinning -> no root -> Chrome keeps its sandbox
-ORCH_EXTRA_ARGS=("$SITES_FILE")
+ORCH_EXTRA_ARGS=("$SITES_FILE" "$NOISE_P" "$NOISE_LLC_MB" "$NOISE_SEED_BASE")
+ORCH_BATCH_ARG=1                 # sweep_lib appends the batch number: the noise seed's offset
 CHROME_PROFILE="/tmp/chrome-website"   # MUST differ from Stage 3's: Chrome reuses a running
                                        # instance when --user-data-dir matches, which would open
                                        # the sampler as a tab in the other run's window.
@@ -132,6 +174,19 @@ if [ "${CLASS_COUNT:-0}" -lt 2 ]; then
     exit 2
 fi
 
+# ---- validate the noise knobs (the orchestrator re-validates; this fails before any build) ----
+for v in NOISE_P NOISE_LLC_MB NOISE_SEED_BASE; do
+    if ! [[ "${!v}" =~ ^[0-9]+$ ]]; then
+        echo "[sweep] ERROR: $v must be a non-negative integer, got '${!v}'" >&2; exit 2
+    fi
+done
+if [ "$NOISE_P" -gt 16 ]; then
+    echo "[sweep] ERROR: NOISE_P must be in [0,16], got $NOISE_P" >&2; exit 2
+fi
+if [ "$NOISE_P" -gt 0 ] && ! [ -r "$SCRIPT_DIR/../JavaScript/flipstress/noise.html" ]; then
+    echo "[sweep] ERROR: NOISE_P=$NOISE_P but JavaScript/flipstress/noise.html is missing" >&2; exit 2
+fi
+
 # ============================================
 # Server / environment
 # ============================================
@@ -140,7 +195,7 @@ SERVER_DIR="$(cd "$SCRIPT_DIR/../JavaScript" 2>/dev/null && pwd)" || {
 DATA_TREE="$SERVER_DIR/data"
 SERVER_LOG="$SCRIPT_DIR/website_server.log"
 SERVER_CORE=2
-CONDA_SH="/home/ubu/anaconda3/etc/profile.d/conda.sh"
+CONDA_SH="/home/michael/miniconda3/etc/profile.d/conda.sh"
 CONDA_ENV="PC37"
 LOG_DIR="$SCRIPT_DIR/web_logs"
 
@@ -153,7 +208,7 @@ REMOTE_HOST="${REMOTE_HOST:-132.72.67.152}"
 REMOTE_USER="${REMOTE_USER:-michael}"
 REMOTE_DIR="${REMOTE_DIR:-/home/michael/michaels_backup_data}"
 LOCAL_H5_DIR="${LOCAL_H5_DIR:-$SCRIPT_DIR/h5}"
-PYTHON_BIN="${PYTHON_BIN:-/home/ubu/anaconda3/envs/PC37/bin/python3}"
+PYTHON_BIN="${PYTHON_BIN:-/home/michael/miniconda3/envs/PC37/bin/python3}"
 DRY_RUN="${DRY_RUN:-0}"
 
 # shellcheck source=sweep_lib.sh

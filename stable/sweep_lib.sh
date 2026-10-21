@@ -81,6 +81,9 @@
 #     ORCH_MAKE_TARGET    make target that builds it
 #     ORCH_SUDO           "sudo" if the orchestrator needs root, "" otherwise
 #     ORCH_EXTRA_ARGS[]   extra args appended after <config> <samples> <cooldown_us>
+#     ORCH_BATCH_ARG      OPTIONAL. 1 = also append the 1-based batch number (after
+#                         ORCH_EXTRA_ARGS). It restarts at 1 for every NoC. Stage 4 uses it to
+#                         seed the FlipStress noise schedule per batch. Default 0 (not appended).
 #     CHROME_PROFILE      --user-data-dir this stage's Chrome uses (must be stage-unique)
 #     EXTRA_PKILL[]       additional process names to reap on cleanup (e.g. stress-ng)
 #     NEEDS_XHOST         1 if Chrome runs as root and needs an xhost grant on :0
@@ -488,8 +491,11 @@ $((done_samples + batch_n))/$SAMPLES_PER_CLASS after this)  $(date '+%H:%M:%S')"
             # `set -o pipefail` (front-end) makes this `if` see the ORCHESTRATOR's status, not
             # tee's.
             batch_t0=$(date +%s)
+            local batch_arg=()
+            [ "${ORCH_BATCH_ARG:-0}" = "1" ] && batch_arg=("$b")
             if ! $ORCH_SUDO "$ORCH_BIN" "$CONFIG" "$batch_n" "$SAMPLE_COOLDOWN_US" \
-                    ${ORCH_EXTRA_ARGS[@]+"${ORCH_EXTRA_ARGS[@]}"} 2>&1 | tee "$RUN_LOG"; then
+                    ${ORCH_EXTRA_ARGS[@]+"${ORCH_EXTRA_ARGS[@]}"} \
+                    ${batch_arg[@]+"${batch_arg[@]}"} 2>&1 | tee "$RUN_LOG"; then
                 echo "[sweep] WARNING: orchestrator failed for $CONFIG" \
                      "$([ "$NUM_BATCHES" -gt 1 ] && echo "(batch $b/$NUM_BATCHES) ")-- continuing" >&2
                 batch_fail=$((batch_fail + 1))

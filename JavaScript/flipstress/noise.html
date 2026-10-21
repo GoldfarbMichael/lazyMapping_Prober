@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>FlipStress noise</title>
+<style>
+  body { font: 14px/1.5 monospace; margin: 16px; background: #fff; color: #111; }
+  .err { color: #b00020; font-weight: bold; }
+</style>
+</head>
+<body>
+<h3>FlipStress noise tab</h3>
+<div id="status">starting...</div>
+<script>
+// noise.html -- the FlipStress noise tab for the Stage 4 website sweep (NOISE_P > 0).
+// -----------------------------------------------------------------------------
+// Opened by website_orchestrator.c as the FIRST tab of every Chrome launch, BEFORE the
+// sampler, as  /flipstress/noise.html?p=<workers>&llc_mb=<MB>&seed=<seed>
+// It replaces the FlipStress extension's popup (popup.js): same workers, same stressor code
+// (allStressors.js), started from a page instead of a button so a sweep can drive it.
+//
+// Coordinator contract (server.py /noise/*), mirroring the sampler's /fp/* handshake:
+//   POST /noise/ready  once ALL p workers have built their buffers and started flipping.
+//                      The orchestrator does not open the sampler until this arrives -- a
+//                      fixed sleep would let the first site of every round see weaker noise.
+//   POST /noise/beat   at most once per second, DRIVEN BY WORKER FLIP MESSAGES rather than a
+//                      timer: this tab is backgrounded for the whole run, and message events
+//                      are not throttled the way background timers are. Workers that stall
+//                      therefore stop the beats, and the orchestrator's per-sample gate
+//                      aborts the run instead of collecting un-noised traces.
+//   POST /noise/error  any failure, so the orchestrator fails fast instead of timing out.
+//
+// The seed is REQUIRED: a run must never use a schedule it did not record.
+// -----------------------------------------------------------------------------
+const NOISE_URL = "http://localhost:8080/noise";
+const MAX_P = 16;          // keep in sync with website_orchestrator.c NOISE_MAX_P
+const BEAT_MS = 1000;
+const SCHEDULE_LOG_LEN = 16;
+
+const statusDiv = document.getElementById("status");
+function show(msg, isErr) {
+    statusDiv.textContent = msg;
+    statusDiv.className = isErr ? "err" : "";
+}
+
+function post(path, body) {
+    return fetch(`${NOISE_URL}/${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    }).catch(err => console.error(`noise/${path} failed:`, err));
+}
+
+function fail(reason) {
+    show(`ERROR: ${reason}`, true);
+    console.error("noise:", reason);
+    post("error", { reason });
+}
+
+// Strict non-negative integer parse: "12abc", "", "1.5" and "-1" are all rejected.
+function parseIntParam(params, name) {
+    const s = params.get(name);
+    return (s !== null && /^\d+$/.test(s)) ? Number(s) : NaN;
+}
+
+// The worker's schedule, reproduced here from the same seed: allStressors.js's SimpleRNG
+// plus its "never the same stressor twice in a row" rule. Kept bit-identical on purpose --
+// the per-flip comparison below is what proves a run used the schedule it logged.
+const NUM_STRESSORS = 7;
+function makeSchedule(seed) {
+    let s = seed, prev = -1;
+    const seq = [];
+    return function at(n) {
+        while (seq.length <= n) {
+            let idx;
+            do {
+                s = (s * 9301 + 49297) % 233280;
+                idx = Math.floor((s / 233280) * NUM_STRESSORS);
+            } while (idx === prev);
+            prev = idx;
+            seq.push(idx);
+        }
+        return seq[n];
+    };
+}
+
+(function main() {
+    const params = new URLSearchParams(window.location.search);
+    const p = parseIntParam(params, "p");
+    const llcMb = parseIntParam(params, "llc_mb");
+    const seed = parseIntParam(params, "seed");
+
+    if (!(p >= 1 && p <= MAX_P)) return fail(`p must be an integer in [1,${MAX_P}], got '${params.get("p")}'`);
+    if (!(llcMb >= 1 && llcMb <= 64)) return fail(`llc_mb must be an integer in [1,64], got '${params.get("llc_mb")}'`);
+    // <= 2^31-1 keeps seed*9301 exact in a double; the LCG reduces it mod 233280 after one step.
+    if (!(seed >= 0 && seed <= 2147483647)) return fail(`seed is required (integer in [0,2^31-1]), got '${params.get("seed")}'`);
+
+    const expected = makeSchedule(seed);
+    const schedule = Array.from({ length: SCHEDULE_LOG_LEN }, (_, n) => expected(n));
+
+    const flips = new Array(p).fill(0);   // per-worker flip count
+    let readyCount = 0, initMsMax = 0, mismatches = 0, readySent = false, lastBeat = 0;
+
+    show(`p=${p} llc_mb=${llcMb} seed=${seed}: initializing ${p} worker(s)...`);
+
+    for (let i = 0; i < p; i++) {
+        const w = new Worker(`allStressors.js?llc_mb=${llcMb}&seed=${seed}`);
+        w.onerror = e => fail(`worker ${i}: ${e.message || "error"}`);
+        w.onmessage = e => {
+            const m = e.data;
+            if (m.type === "error") return fail(`worker ${i}: ${m.reason}`);
+            if (m.type === "ready") {
+                readyCount++;
+                initMsMax = Math.max(initMsMax, m.init_ms);
+                if (readyCount === p && !readySent) {
+                    readySent = true;
+                    show(`p=${p} llc_mb=${llcMb} seed=${seed}: all workers flipping ` +
+                         `(init ${initMsMax} ms). schedule=[${schedule.join(",")}]`);
+                    post("ready", { p, llc_mb: llcMb, seed, init_ms: initMsMax,
+                                    schedule: schedule.join(",") });
+                }
+                return;
+            }
+            if (m.type === "flip") {
+                if (m.idx !== expected(m.n)) mismatches++;
+                flips[i] = m.n + 1;
+                const now = performance.now();
+                if (readySent && now - lastBeat >= BEAT_MS) {
+                    lastBeat = now;
+                    post("beat", { min_flips: Math.min(...flips), mismatches });
+                }
+            }
+        };
+        w.postMessage("start");
+    }
+})();
+</script>
+</body>
+</html>

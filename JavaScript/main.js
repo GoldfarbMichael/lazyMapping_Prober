@@ -61,12 +61,12 @@ const CYCLES_PER_ADDRESS = parsed ? parsed.cycles : 2288;  // est. CPU cycles pe
 const K = parsed ? parsed.k : 45;                          // accesses between timer polls
 
 // ----- LLC geometry (SET THESE TO YOUR CPU; not part of the label) -----
-const LLC_WAYS = 12;               // associativity (lines per eviction set)
-const LLC_SETS = 16384;            // 2^14 (2048 sets per slice x 8 slices)
+const LLC_WAYS = 16;               // associativity (lines per eviction set)
+const LLC_SETS = 12288;            // 2^14 (2048 sets per slice x 8 slices)
 const LLC_SIZE_MB = 12;            // cross-checked against LLC_SETS * LLC_WAYS
 
 // ----- Timing model (per-machine; not part of the label) -----
-const CLOCK_SPEED = 3.6e9;         // CPU clock in Hz (cycles/sec); NOT the browser timer
+const CLOCK_SPEED = 3.1e9;         // CPU clock in Hz (cycles/sec); NOT the browser timer
 const MIN_QUANTUM_MS = 0.5;        // floor: never sweep a cluster for less than 500 us
 
 // ----- Dynamic-K config (K === 0 in the label selects the dynamic-K sweep) -----

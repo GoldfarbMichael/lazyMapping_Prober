@@ -27,8 +27,14 @@
 #   finalize_website.sh <TST> <K> <CPA> <NoC...>
 # Config via environment (exported by the caller; defaults in finalize_lib.sh):
 #   REMOTE_HOST REMOTE_USER REMOTE_DIR PYTHON_BIN LOCAL_H5_DIR DRY_RUN
-#   H5_LABEL   h5 filename stem (default "website"), e.g. H5_LABEL=website_zeev
+#   H5_LABEL   h5 filename stem (default: WEBSITE_TAG), e.g. H5_LABEL=website_zeev
 #              -> website_zeev_<TST>TST_<K>K_<CPA>cycles.h5
+#   WEBSITE_TAG config-dir tag (default "website"). run_website_sweep.sh exports
+#              "website_p<N>flip" for a FlipStress-noise sweep (NOISE_P=N), so the noisy
+#              website_p<N>flip_<NoC>C_... tree is packed -- never the clean one -- into
+#              website_p<N>flip_<TST>TST_<K>K_<CPA>cycles.h5. The tag ends in a letter on purpose:
+#              finalize_lib.sh appends the rerun index straight onto the stem, and a digit-final
+#              tag would make p=1's 2nd run ("..._p12...") collide with p=12's 1st.
 #
 set -euo pipefail
 
@@ -55,16 +61,17 @@ DATA_ROOT="$JS_DIR/data"
 # 2. Config dir names: the label run_fingerprint_sweep.sh hands the orchestrator, with the
 #    "realbrowser_" tag the orchestrator prepends before handing it to /fp/cmd.
 # ---------------------------------------------------------------------------
+TAG="${WEBSITE_TAG:-website}"
 CONFIG_DIRS=()
 for noc in "${NOCS[@]}"; do
-    CONFIG_DIRS+=("website_${noc}C_${TST}TST_${K}K_${CPA}cycles")
+    CONFIG_DIRS+=("${TAG}_${noc}C_${TST}TST_${K}K_${CPA}cycles")
 done
 
 # ---------------------------------------------------------------------------
 # 3. h5 name: <label><rerun-index><tail>, e.g. realbrowser_2TST_0K_4576cycles.h5, then
 #    realbrowser2_2TST_0K_4576cycles.h5 for the next sweep with the same parameters.
 # ---------------------------------------------------------------------------
-CLOCK_LABEL="${H5_LABEL:-website}"   # H5_LABEL overrides the stem only; tail + rerun index stay
+CLOCK_LABEL="${H5_LABEL:-$TAG}"      # H5_LABEL overrides the stem only; tail + rerun index stay
 NAME_TAIL="_${TST}TST_${K}K_${CPA}cycles.h5"
 
 # ---------------------------------------------------------------------------
